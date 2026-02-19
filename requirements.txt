@@ -1,0 +1,4 @@
+# MicroPKI - Sprint 1
+# Python 3.8+ required
+cryptography>=42.0.0
+pytest>=7.0
