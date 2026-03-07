@@ -1,97 +1,225 @@
-"""Root CA: key generation, self-signed certificate, policy file, verification."""
+"""CA operations: Root init, Intermediate CA, end-entity issuance, verification."""
 
-from pathlib import Path
+from __future__ import annotations
+
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.x509.oid import NameOID
 
 from . import certificates
 from . import crypto_utils
+from . import csr as csr_module
 from . import logger as log_module
+from . import templates as tmpl
 
+
+# ---------------------------------------------------------------------------
+# Key generation helper (deduplicates rsa/ecc branching)
+# ---------------------------------------------------------------------------
+
+def _gen_key(key_type: str, key_size: int, logger, label: str = ""):
+    logger.info("Starting key generation%s (type=%s, size=%s)",
+                f" for {label}" if label else "", key_type, key_size)
+    key = crypto_utils.generate_key(key_type, key_size)
+    logger.info("Key generation completed successfully")
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1: Root CA
+# ---------------------------------------------------------------------------
 
 def init_root_ca(
-    subject: str,
-    key_type: str,
-    key_size: int,
-    passphrase: bytes,
-    out_dir: str,
-    validity_days: int,
-    log_file: str | None = None,
-    force: bool = False,
+    subject: str, key_type: str, key_size: int,
+    passphrase: bytes, out_dir: str, validity_days: int,
+    log_file: str | None = None, force: bool = False,
 ) -> None:
-    """
-    Create self-signed Root CA: generate key, build cert, write encrypted key,
-    cert PEM, and policy.txt. Creates private/, certs/ under out_dir.
-    """
+    """Create self-signed Root CA: key, cert, policy.txt."""
     logger = log_module.setup_logging(log_file)
-
     out = Path(out_dir)
-    private_dir = out / "private"
-    certs_dir = out / "certs"
-    key_path = private_dir / "ca.key.pem"
-    cert_path = certs_dir / "ca.cert.pem"
+    key_path = out / "private" / "ca.key.pem"
+    cert_path = out / "certs" / "ca.cert.pem"
     policy_path = out / "policy.txt"
 
-    if not force:
-        for p in (key_path, cert_path):
-            if p.exists():
-                logger.error("Refusing to overwrite existing file: %s (use --force to override)", p)
-                raise FileExistsError(f"File exists: {p}")
+    _check_overwrite([key_path, cert_path], force, logger)
 
-    # Key generation
-    logger.info("Starting key generation (type=%s, size=%s)", key_type, key_size)
-    if key_type == "rsa":
-        key = crypto_utils.generate_rsa_key(key_size)
-    else:
-        key = crypto_utils.generate_ecc_key(key_size)
-    logger.info("Key generation completed successfully")
+    key = _gen_key(key_type, key_size, logger)
 
-    # Certificate
     logger.info("Starting certificate signing")
     cert = certificates.build_self_signed_root_ca(
-        subject_dn=subject,
-        private_key=key,
-        validity_days=validity_days,
-        key_type=key_type,
-        key_size=key_size,
+        subject_dn=subject, private_key=key,
+        validity_days=validity_days, key_type=key_type, key_size=key_size,
     )
     logger.info("Certificate signing completed successfully")
 
-    # Dirs and permissions
-    crypto_utils.ensure_private_dir_permissions(str(private_dir), logger=logger)
-    certs_dir.mkdir(parents=True, exist_ok=True)
+    _save_ca_artifacts(out, key_path, cert_path, key, passphrase, cert, logger)
 
-    # Save key (write_private_key_pem logs the path internally)
-    crypto_utils.write_private_key_pem(str(key_path), key, passphrase, logger=logger)
-
-    # Save cert
-    pem = crypto_utils.cert_to_pem(cert)
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
-    cert_path.write_bytes(pem)
-    logger.info("Saved certificate to %s", str(cert_path.resolve()))
-
-    # Policy document (serial as hex)
     algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
-    policy_content = _build_policy_content(
-        subject=subject,
-        serial_hex=f"{cert.serial_number:x}",
-        not_before=cert.not_valid_before_utc,
-        not_after=cert.not_valid_after_utc,
-        key_algo=algo_desc,
-    )
-    policy_path.write_text(policy_content, encoding="utf-8")
+    policy_path.write_text(_build_root_policy(
+        subject, f"{cert.serial_number:x}",
+        cert.not_valid_before_utc, cert.not_valid_after_utc, algo_desc,
+    ), encoding="utf-8")
     logger.info("Generated policy document at %s", str(policy_path.resolve()))
 
 
-def _build_policy_content(
-    subject: str,
-    serial_hex: str,
-    not_before: datetime,
-    not_after: datetime,
-    key_algo: str,
-) -> str:
-    """Build policy.txt content (POL-1)."""
+# ---------------------------------------------------------------------------
+# Sprint 2: Intermediate CA
+# ---------------------------------------------------------------------------
+
+def issue_intermediate_ca(
+    root_cert_path: str, root_key_path: str, root_passphrase: bytes,
+    subject: str, key_type: str, key_size: int,
+    passphrase: bytes, out_dir: str, validity_days: int,
+    pathlen: int = 0, log_file: str | None = None, force: bool = False,
+) -> None:
+    """Generate Intermediate CA: key, CSR, Root signs it, save, update policy."""
+    logger = log_module.setup_logging(log_file)
+    out = Path(out_dir)
+    key_path = out / "private" / "intermediate.key.pem"
+    cert_path = out / "certs" / "intermediate.cert.pem"
+    policy_path = out / "policy.txt"
+
+    _check_overwrite([key_path, cert_path], force, logger)
+
+    root_cert = crypto_utils.load_certificate_pem(root_cert_path)
+    root_key = crypto_utils.load_private_key_encrypted(root_key_path, root_passphrase)
+
+    inter_key = _gen_key(key_type, key_size, logger, "Intermediate CA")
+
+    logger.info("Generating Intermediate CA CSR")
+    inter_csr = csr_module.generate_intermediate_csr(subject, inter_key, pathlen)
+    logger.info("Intermediate CA CSR generated")
+
+    logger.info("Signing Intermediate CA certificate with Root CA")
+    inter_cert = csr_module.sign_intermediate_csr(
+        inter_csr, root_cert, root_key, validity_days, pathlen,
+    )
+    logger.info("Intermediate CA certificate signed (serial=%x)", inter_cert.serial_number)
+
+    _save_ca_artifacts(out, key_path, cert_path, inter_key, passphrase, inter_cert, logger)
+
+    algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
+    _append_intermediate_policy(
+        policy_path, subject, f"{inter_cert.serial_number:x}",
+        inter_cert.not_valid_before_utc, inter_cert.not_valid_after_utc,
+        algo_desc, pathlen, root_cert.subject.rfc4514_string(),
+    )
+    logger.info("Updated policy document at %s", str(policy_path.resolve()))
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2: End-entity certificates
+# ---------------------------------------------------------------------------
+
+def issue_end_entity(
+    ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes,
+    template: str, subject: str, san_strings: list[str],
+    out_dir: str, validity_days: int,
+    csr_path: str | None = None, log_file: str | None = None,
+) -> None:
+    """Issue end-entity certificate using a template. Optionally sign external CSR."""
+    logger = log_module.setup_logging(log_file)
+
+    ca_cert = crypto_utils.load_certificate_pem(ca_cert_path)
+    ca_key = crypto_utils.load_private_key_encrypted(ca_key_path, ca_passphrase)
+
+    san_names = tmpl.parse_san_list(san_strings) if san_strings else []
+    tmpl.validate_san_for_template(template, san_names)
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    base_name = _safe_filename(_extract_cn(subject))
+
+    if csr_path:
+        ext_csr = crypto_utils.load_csr_pem(csr_path)
+        if not ext_csr.is_signature_valid:
+            raise ValueError("CSR signature verification failed")
+        public_key = ext_csr.public_key()
+        leaf_key = None
+    else:
+        logger.info("Generating key pair for end-entity certificate")
+        is_rsa_ca = crypto_utils.is_rsa_key(ca_key)
+        leaf_key = crypto_utils.generate_key("rsa", 2048) if is_rsa_ca else crypto_utils.generate_key("ecc", 256)
+        public_key = leaf_key.public_key()
+        logger.info("Key pair generated for %s", subject)
+
+    ext = tmpl.get_template_extensions(template, san_names, is_rsa=crypto_utils.is_rsa_key(public_key))
+
+    logger.info("Issuing %s certificate for %s", template, subject)
+    cert = csr_module.issue_end_entity_cert(
+        subject_dn=subject, public_key=public_key,
+        ca_cert=ca_cert, ca_key=ca_key,
+        validity_days=validity_days, template_ext=ext,
+    )
+    san_desc = ", ".join(san_strings) if san_strings else "none"
+    logger.info(
+        "Certificate issued: serial=%x, subject=%s, template=%s, SANs=[%s], issued=%s",
+        cert.serial_number, subject, template, san_desc,
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    cert_file = out / f"{base_name}.cert.pem"
+    cert_file.write_bytes(crypto_utils.cert_to_pem(cert))
+    logger.info("Saved certificate to %s", str(cert_file.resolve()))
+
+    if leaf_key is not None:
+        key_file = out / f"{base_name}.key.pem"
+        crypto_utils.write_private_key_unencrypted(str(key_file), leaf_key, logger=logger)
+
+
+# ---------------------------------------------------------------------------
+# Verification (Sprint 1 + Sprint 2)
+# ---------------------------------------------------------------------------
+
+def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:
+    """Verify self-signed certificate."""
+    logger = log_module.setup_logging(log_file)
+    cert = crypto_utils.load_certificate_pem(cert_path)
+    try:
+        crypto_utils.verify_cert_signature(cert, cert)
+    except Exception as e:
+        logger.error("Certificate signature verification failed: %s", e)
+        raise
+    logger.info("Certificate verification succeeded: %s", cert_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _check_overwrite(paths: list[Path], force: bool, logger) -> None:
+    if force:
+        return
+    for p in paths:
+        if p.exists():
+            logger.error("Refusing to overwrite: %s (use --force)", p)
+            raise FileExistsError(f"File exists: {p}")
+
+
+def _save_ca_artifacts(out: Path, key_path: Path, cert_path: Path,
+                       key, passphrase: bytes, cert, logger) -> None:
+    crypto_utils.ensure_private_dir_permissions(str(key_path.parent), logger=logger)
+    crypto_utils.write_private_key_pem(str(key_path), key, passphrase, logger=logger)
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(crypto_utils.cert_to_pem(cert))
+    logger.info("Saved certificate to %s", str(cert_path.resolve()))
+
+
+def _extract_cn(subject_dn: str) -> str:
+    name = certificates.parse_subject_dn(subject_dn)
+    attrs = name.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return attrs[0].value if attrs else "cert"
+
+
+def _safe_filename(name: str) -> str:
+    safe = re.sub(r'[^\w.\-]', '_', name).strip('_')
+    return safe or "cert"
+
+
+def _build_root_policy(subject, serial_hex, not_before, not_after, key_algo) -> str:
     created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"""MicroPKI Certificate Policy Document
 =====================================
@@ -110,30 +238,19 @@ for the MicroPKI PKI. Use only in non-production or lab environments.
 """
 
 
-def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:
-    """
-    Verify certificate using itself as trust anchor (self-signed).
-    Returns True if valid. Logs and raises on failure.
-    """
-    logger = log_module.setup_logging(log_file)
-    cert = crypto_utils.load_certificate_pem(cert_path)
-    pub = cert.public_key()
-    try:
-        if isinstance(pub, rsa.RSAPublicKey):
-            pub.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                padding.PKCS1v15(),
-                cert.signature_hash_algorithm,
-            )
-        else:
-            pub.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                ec.ECDSA(cert.signature_hash_algorithm),
-            )
-    except Exception as e:
-        logger.error("Certificate signature verification failed: %s", e)
-        raise
-    logger.info("Certificate verification succeeded: %s", cert_path)
-    return True
+def _append_intermediate_policy(policy_path, subject, serial_hex,
+                                not_before, not_after, key_algo, pathlen, issuer_dn) -> None:
+    section = f"""
+Intermediate CA
+---------------
+CA Name (Subject DN): {subject}
+Certificate Serial Number (hex): {serial_hex}
+Validity Period:
+  NotBefore: {not_before.strftime('%Y-%m-%d %H:%M:%S UTC')}
+  NotAfter:  {not_after.strftime('%Y-%m-%d %H:%M:%S UTC')}
+Key Algorithm and Size: {key_algo}
+Path Length Constraint: {pathlen}
+Issuer (Root CA) DN: {issuer_dn}
+"""
+    with open(policy_path, "a", encoding="utf-8") as f:
+        f.write(section)

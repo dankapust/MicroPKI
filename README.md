@@ -169,19 +169,64 @@ openssl x509 -in pki/certs/ca.cert.pem -text -noout
 openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/ca.cert.pem
 ```
 
+## Usage (Sprint 2)
+
+### Create Intermediate CA signed by Root CA
+
+```powershell
+Set-Content -Path secrets\inter.pass -Value "intermediate-passphrase" -NoNewline
+micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "CN=MicroPKI Intermediate CA,O=MicroPKI" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
+```
+
+### Issue a server certificate
+
+```powershell
+micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template server --subject "CN=example.com,O=MicroPKI" --san dns:example.com --san dns:www.example.com --san ip:192.168.1.10 --out-dir pki\certs --validity-days 365
+```
+
+### Issue a client certificate
+
+```powershell
+micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template client --subject "CN=Alice Smith" --san email:alice@example.com --out-dir pki\certs
+```
+
+### Issue a code signing certificate
+
+```powershell
+micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template code_signing --subject "CN=MicroPKI Code Signer" --out-dir pki\certs
+```
+
+### Validate certificate chain (leaf → intermediate → root)
+
+```powershell
+micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pki\certs\intermediate.cert.pem --root pki\certs\ca.cert.pem
+```
+
+OpenSSL interoperability:
+
+```bash
+openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/intermediate.cert.pem
+openssl verify -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
+```
+
 ## Project layout
 
 ```
 micropki/
   __init__.py
-  cli.py           # argument parser, ca init / ca verify
-  ca.py            # root CA logic
-  certificates.py  # X.509 build and extensions
-  crypto_utils.py  # PEM, key load, encryption
-  logger.py        # logging setup
-tests/             # pytest
+  __main__.py       # python -m micropki
+  cli.py            # argument parser: ca init, issue-intermediate, issue-cert, verify, verify-chain
+  ca.py             # Root CA init, Intermediate CA, end-entity issuance, verify
+  certificates.py   # X.509 build and extensions, DN parsing
+  csr.py            # CSR generation, Intermediate/end-entity signing
+  templates.py      # Certificate templates (server, client, code_signing), SAN parsing
+  chain.py          # Chain validation: signatures, validity, constraints
+  crypto_utils.py   # PEM, key generation, encryption, passphrase loading
+  logger.py         # logging setup (file/stderr, ISO 8601)
+tests/              # pytest (50 tests)
+scripts/            # verify_key_cert_match.py
 requirements.txt
-pyproject.toml     # for pip install -e .
+pyproject.toml
 ```
 
 ## License

@@ -22,10 +22,16 @@ def test_generate_ecc_key():
     assert key.curve.name == "secp384r1"
 
 
-def test_generate_ecc_key_only_384():
-    """Only 384 is allowed for ECC."""
-    with pytest.raises(ValueError, match="Only P-384"):
-        crypto_utils.generate_ecc_key(256)
+def test_generate_ecc_key_p256():
+    """P-256 is allowed for end-entity keys."""
+    key = crypto_utils.generate_ecc_key(256)
+    assert key.curve.name == "secp256r1"
+
+
+def test_generate_ecc_key_unsupported():
+    """Unsupported ECC sizes must fail."""
+    with pytest.raises(ValueError, match="P-256.*P-384"):
+        crypto_utils.generate_ecc_key(521)
 
 
 def test_load_passphrase_strips_newline():

@@ -1,4 +1,6 @@
-"""CLI: micropki ca init, ca verify; input validation and secure passphrase handling."""
+"""CLI: micropki ca init|issue-intermediate|issue-cert|verify|verify-chain."""
+
+from __future__ import annotations
 
 import argparse
 import sys
@@ -9,115 +11,206 @@ from . import crypto_utils
 from . import logger as log_module
 
 
-def _validate_ca_init_args(parser: argparse.ArgumentParser, args) -> None:
-    """Validate ca init arguments; on failure log/print error and exit non-zero."""
-    log = log_module.setup_logging(getattr(args, "log_file", None))
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    if not (getattr(args, "subject", None) or "").strip():
-        log.error("Validation failed: --subject is required and must be non-empty")
-        parser.error("--subject is required and must be a non-empty string")
+def _validate_file_exists(parser, path, label):
+    if not path or not Path(path).is_file():
+        parser.error(f"{label} must exist and be readable: {path}")
 
-    key_type = getattr(args, "key_type", "rsa").lower()
-    if key_type not in ("rsa", "ecc"):
-        log.error("Validation failed: --key-type must be 'rsa' or 'ecc'")
-        parser.error("--key-type must be 'rsa' or 'ecc'")
 
-    key_size = getattr(args, "key_size", None)
-    if key_type == "rsa":
-        if key_size != 4096:
-            log.error("Validation failed: --key-size must be 4096 for RSA")
-            parser.error("--key-size must be 4096 for RSA")
-    else:
-        if key_size != 384:
-            log.error("Validation failed: --key-size must be 384 for ECC")
-            parser.error("--key-size must be 384 for ECC")
-
-    pass_file = getattr(args, "passphrase_file", None)
-    if not pass_file:
-        log.error("Validation failed: --passphrase-file is required")
-        parser.error("--passphrase-file is required")
-    p = Path(pass_file)
+def _validate_passphrase_file(parser, path, label="--passphrase-file"):
+    if not path:
+        parser.error(f"{label} is required")
+    p = Path(path)
     if not p.exists():
-        log.error("Validation failed: passphrase file does not exist: %s", pass_file)
-        parser.error(f"--passphrase-file must exist and be readable: {pass_file}")
+        parser.error(f"{label} must exist: {path}")
     if not p.is_file():
-        log.error("Validation failed: passphrase path is not a file: %s", pass_file)
-        parser.error(f"--passphrase-file is not a file: {pass_file}")
+        parser.error(f"{label} is not a file: {path}")
     try:
         p.read_bytes()
-    except OSError as e:
-        log.error("Validation failed: cannot read passphrase file: %s", e)
-        parser.error(f"Cannot read --passphrase-file: {pass_file}")
+    except OSError:
+        parser.error(f"Cannot read {label}: {path}")
 
-    out_dir = getattr(args, "out_dir", "./pki") or "./pki"
-    out = Path(out_dir)
-    if out.exists() and not out.is_dir():
-        log.error("Validation failed: --out-dir exists and is not a directory: %s", out_dir)
-        parser.error(f"--out-dir must be a directory: {out_dir}")
-    try:
-        out.mkdir(parents=True, exist_ok=True)
-        # Check writable
-        test = out / ".micropki_write_test"
-        test.write_text("")
-        test.unlink()
-    except OSError as e:
-        log.error("Validation failed: --out-dir is not writable: %s", e)
-        parser.error(f"--out-dir must be writable: {out_dir}")
 
-    validity = getattr(args, "validity_days", 3650)
-    if not isinstance(validity, int) or validity <= 0:
-        log.error("Validation failed: --validity-days must be a positive integer")
-        parser.error("--validity-days must be a positive integer")
-
-    # Optional: DN syntax
+def _validate_subject(parser, args):
+    subject = getattr(args, "subject", None)
+    if not (subject or "").strip():
+        parser.error("--subject is required and must be non-empty")
     try:
         from . import certificates
-        certificates.parse_subject_dn(args.subject)
+        certificates.parse_subject_dn(subject)
     except ValueError as e:
-        log.error("Validation failed: invalid DN syntax: %s", e)
         parser.error(f"Invalid --subject DN: {e}")
 
 
+def _validate_out_dir(parser, out_dir):
+    out = Path(out_dir)
+    if out.exists() and not out.is_dir():
+        parser.error(f"--out-dir must be a directory: {out_dir}")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        test = out / ".micropki_write_test"
+        test.write_text("")
+        test.unlink()
+    except OSError:
+        parser.error(f"--out-dir must be writable: {out_dir}")
+
+
+# ---------------------------------------------------------------------------
+# ca init (Sprint 1)
+# ---------------------------------------------------------------------------
+
 def cmd_ca_init(args) -> int:
-    """Run ca init: validate, load passphrase securely, run init_root_ca."""
-    parser = getattr(args, "_parser", None)
-    _validate_ca_init_args(parser or argparse.ArgumentParser(), args)
+    parser = getattr(args, "_parser", argparse.ArgumentParser())
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+
+    _validate_subject(parser, args)
+
+    key_type = args.key_type.lower()
+    if key_type == "rsa" and args.key_size != 4096:
+        log.error("--key-size must be 4096 for RSA")
+        parser.error("--key-size must be 4096 for RSA")
+    if key_type == "ecc" and args.key_size != 384:
+        log.error("--key-size must be 384 for ECC")
+        parser.error("--key-size must be 384 for ECC")
+
+    _validate_passphrase_file(parser, args.passphrase_file)
+    out_dir = args.out_dir or "./pki"
+    _validate_out_dir(parser, out_dir)
+
+    if not isinstance(args.validity_days, int) or args.validity_days <= 0:
+        parser.error("--validity-days must be a positive integer")
 
     try:
         passphrase = crypto_utils.load_passphrase(args.passphrase_file)
-    except (FileNotFoundError, ValueError) as e:
-        log = log_module.setup_logging(getattr(args, "log_file", None))
+    except Exception as e:
         log.error("Cannot read passphrase file: %s", e)
-        # Do not echo passphrase or file content
         print("Error: could not read passphrase file.", file=sys.stderr)
         return 1
 
     try:
         ca.init_root_ca(
             subject=args.subject.strip(),
-            key_type=args.key_type.lower(),
+            key_type=key_type,
             key_size=args.key_size,
             passphrase=passphrase,
-            out_dir=args.out_dir or "./pki",
+            out_dir=out_dir,
             validity_days=args.validity_days,
             log_file=args.log_file,
             force=getattr(args, "force", False),
         )
     except FileExistsError as e:
-        log = log_module.setup_logging(getattr(args, "log_file", None))
-        log.error("%s", e)
         print(str(e), file=sys.stderr)
         return 1
     except Exception as e:
-        log = log_module.setup_logging(getattr(args, "log_file", None))
         log.exception("CA init failed")
         print(f"Error: {e}", file=sys.stderr)
         return 1
     return 0
 
 
+# ---------------------------------------------------------------------------
+# ca issue-intermediate (Sprint 2)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_issue_intermediate(args) -> int:
+    parser = getattr(args, "_parser", argparse.ArgumentParser())
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+
+    _validate_file_exists(parser, args.root_cert, "--root-cert")
+    _validate_file_exists(parser, args.root_key, "--root-key")
+    _validate_passphrase_file(parser, args.root_pass_file, "--root-pass-file")
+    _validate_passphrase_file(parser, args.passphrase_file, "--passphrase-file")
+    _validate_subject(parser, args)
+    out_dir = args.out_dir or "./pki"
+    _validate_out_dir(parser, out_dir)
+
+    try:
+        root_pass = crypto_utils.load_passphrase(args.root_pass_file)
+        inter_pass = crypto_utils.load_passphrase(args.passphrase_file)
+    except Exception as e:
+        log.error("Cannot read passphrase file: %s", e)
+        print("Error: could not read passphrase file.", file=sys.stderr)
+        return 1
+
+    try:
+        ca.issue_intermediate_ca(
+            root_cert_path=args.root_cert,
+            root_key_path=args.root_key,
+            root_passphrase=root_pass,
+            subject=args.subject.strip(),
+            key_type=args.key_type.lower(),
+            key_size=args.key_size,
+            passphrase=inter_pass,
+            out_dir=out_dir,
+            validity_days=args.validity_days,
+            pathlen=args.pathlen,
+            log_file=args.log_file,
+            force=getattr(args, "force", False),
+        )
+    except FileExistsError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    except Exception as e:
+        log.exception("issue-intermediate failed")
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ca issue-cert (Sprint 2)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_issue_cert(args) -> int:
+    parser = getattr(args, "_parser", argparse.ArgumentParser())
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+
+    _validate_file_exists(parser, args.ca_cert, "--ca-cert")
+    _validate_file_exists(parser, args.ca_key, "--ca-key")
+    _validate_passphrase_file(parser, args.ca_pass_file, "--ca-pass-file")
+    _validate_subject(parser, args)
+    out_dir = args.out_dir or "./pki/certs"
+    _validate_out_dir(parser, out_dir)
+
+    try:
+        ca_pass = crypto_utils.load_passphrase(args.ca_pass_file)
+    except Exception as e:
+        log.error("Cannot read passphrase file: %s", e)
+        print("Error: could not read passphrase file.", file=sys.stderr)
+        return 1
+
+    try:
+        ca.issue_end_entity(
+            ca_cert_path=args.ca_cert,
+            ca_key_path=args.ca_key,
+            ca_passphrase=ca_pass,
+            template=args.template,
+            subject=args.subject.strip(),
+            san_strings=args.san or [],
+            out_dir=out_dir,
+            validity_days=args.validity_days,
+            csr_path=getattr(args, "csr", None),
+            log_file=args.log_file,
+        )
+    except ValueError as e:
+        log.error("Validation error: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        log.exception("issue-cert failed")
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# ca verify (Sprint 1)
+# ---------------------------------------------------------------------------
+
 def cmd_ca_verify(args) -> int:
-    """Verify certificate (self-signed) with micropki ca verify --cert <path>."""
     cert_path = getattr(args, "cert", None)
     if not cert_path or not Path(cert_path).exists():
         log = log_module.setup_logging(getattr(args, "log_file", None))
@@ -128,37 +221,104 @@ def cmd_ca_verify(args) -> int:
         ca.verify_certificate(cert_path, log_file=args.log_file)
         return 0
     except Exception as e:
-        log = log_module.setup_logging(getattr(args, "log_file", None))
-        log.error("Verification failed: %s", e)
         print(f"Verification failed: {e}", file=sys.stderr)
         return 1
 
+
+# ---------------------------------------------------------------------------
+# ca verify-chain (Sprint 2, TEST-7)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_verify_chain(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import chain as chain_module
+
+    for p in [args.leaf, args.root] + (args.intermediate or []):
+        if not Path(p).is_file():
+            log.error("File not found: %s", p)
+            print(f"Error: file not found: {p}", file=sys.stderr)
+            return 1
+
+    try:
+        leaf = crypto_utils.load_certificate_pem(args.leaf)
+        root = crypto_utils.load_certificate_pem(args.root)
+        intermediates = [crypto_utils.load_certificate_pem(p) for p in (args.intermediate or [])]
+        chain_module.validate_chain(leaf, intermediates, root)
+        log.info("Chain validation succeeded: leaf=%s", args.leaf)
+        print("Chain validation: OK")
+        return 0
+    except Exception as e:
+        log.error("Chain validation failed: %s", e)
+        print(f"Chain validation failed: {e}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="micropki", description="MicroPKI - minimal PKI")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # ca
     ca_parser = subparsers.add_parser("ca", help="CA operations")
     ca_sub = ca_parser.add_subparsers(dest="ca_command")
 
-    # ca init
-    init_p = ca_sub.add_parser("init", help="Create self-signed Root CA")
-    init_p.set_defaults(_parser=init_p, _run=cmd_ca_init)
-    init_p.add_argument("--subject", required=True, help="Distinguished Name (e.g. /CN=My Root CA)")
-    init_p.add_argument("--key-type", default="rsa", choices=["rsa", "ecc"], help="Key type (default: rsa)")
-    init_p.add_argument("--key-size", type=int, default=4096, help="RSA 4096 or ECC 384")
-    init_p.add_argument("--passphrase-file", required=True, help="Path to file with passphrase")
-    init_p.add_argument("--out-dir", default="./pki", help="Output directory (default: ./pki)")
-    init_p.add_argument("--validity-days", type=int, default=3650, help="Validity in days (default: 3650)")
-    init_p.add_argument("--log-file", default=None, help="Log file (default: stderr)")
-    init_p.add_argument("--force", action="store_true", help="Overwrite existing key/cert files")
+    # --- ca init ---
+    p = ca_sub.add_parser("init", help="Create self-signed Root CA")
+    p.set_defaults(_parser=p, _run=cmd_ca_init)
+    p.add_argument("--subject", required=True)
+    p.add_argument("--key-type", default="rsa", choices=["rsa", "ecc"])
+    p.add_argument("--key-size", type=int, default=4096)
+    p.add_argument("--passphrase-file", required=True)
+    p.add_argument("--out-dir", default="./pki")
+    p.add_argument("--validity-days", type=int, default=3650)
+    p.add_argument("--log-file", default=None)
+    p.add_argument("--force", action="store_true")
 
-    # ca verify
-    verify_p = ca_sub.add_parser("verify", help="Verify certificate (self-signed)")
-    verify_p.set_defaults(_run=cmd_ca_verify)
-    verify_p.add_argument("--cert", required=True, help="Path to certificate PEM")
-    verify_p.add_argument("--log-file", default=None, help="Log file (default: stderr)")
+    # --- ca issue-intermediate ---
+    p = ca_sub.add_parser("issue-intermediate", help="Create Intermediate CA signed by Root")
+    p.set_defaults(_parser=p, _run=cmd_ca_issue_intermediate)
+    p.add_argument("--root-cert", required=True, help="Root CA cert PEM")
+    p.add_argument("--root-key", required=True, help="Root CA encrypted key PEM")
+    p.add_argument("--root-pass-file", required=True, help="Root CA passphrase file")
+    p.add_argument("--subject", required=True)
+    p.add_argument("--key-type", default="rsa", choices=["rsa", "ecc"])
+    p.add_argument("--key-size", type=int, default=4096)
+    p.add_argument("--passphrase-file", required=True, help="Intermediate CA passphrase file")
+    p.add_argument("--out-dir", default="./pki")
+    p.add_argument("--validity-days", type=int, default=1825)
+    p.add_argument("--pathlen", type=int, default=0)
+    p.add_argument("--log-file", default=None)
+    p.add_argument("--force", action="store_true")
+
+    # --- ca issue-cert ---
+    p = ca_sub.add_parser("issue-cert", help="Issue end-entity certificate")
+    p.set_defaults(_parser=p, _run=cmd_ca_issue_cert)
+    p.add_argument("--ca-cert", required=True, help="Issuing CA cert PEM")
+    p.add_argument("--ca-key", required=True, help="Issuing CA encrypted key PEM")
+    p.add_argument("--ca-pass-file", required=True, help="Issuing CA passphrase file")
+    p.add_argument("--template", required=True, choices=["server", "client", "code_signing"])
+    p.add_argument("--subject", required=True)
+    p.add_argument("--san", action="append", help="SAN entry (e.g. dns:example.com, ip:1.2.3.4, email:a@b.c)")
+    p.add_argument("--out-dir", default="./pki/certs")
+    p.add_argument("--validity-days", type=int, default=365)
+    p.add_argument("--csr", default=None, help="External CSR PEM (optional)")
+    p.add_argument("--log-file", default=None)
+
+    # --- ca verify ---
+    p = ca_sub.add_parser("verify", help="Verify certificate (self-signed)")
+    p.set_defaults(_run=cmd_ca_verify)
+    p.add_argument("--cert", required=True)
+    p.add_argument("--log-file", default=None)
+
+    # --- ca verify-chain ---
+    p = ca_sub.add_parser("verify-chain", help="Validate full certificate chain")
+    p.set_defaults(_run=cmd_ca_verify_chain)
+    p.add_argument("--leaf", required=True, help="Leaf certificate PEM")
+    p.add_argument("--intermediate", action="append", help="Intermediate cert(s) PEM")
+    p.add_argument("--root", required=True, help="Root CA cert PEM")
+    p.add_argument("--log-file", default=None)
 
     args = parser.parse_args()
 
