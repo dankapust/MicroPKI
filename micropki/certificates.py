@@ -65,6 +65,7 @@ def build_self_signed_root_ca(
     validity_days: int,
     key_type: str,
     key_size: int,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """
     Build X.509 v3 self-signed Root CA certificate.
@@ -89,7 +90,7 @@ def build_self_signed_root_ca(
         .subject_name(name)
         .issuer_name(name)
         .public_key(public_key)
-        .serial_number(make_serial())
+        .serial_number(serial_number or make_serial())
         .not_valid_before(not_before)
         .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)

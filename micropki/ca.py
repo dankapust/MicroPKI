@@ -9,9 +9,11 @@ from pathlib import Path
 from cryptography.x509.oid import NameOID
 
 from . import certificates
+from . import database
 from . import crypto_utils
 from . import csr as csr_module
 from . import logger as log_module
+from . import serial as serial_module
 from . import templates as tmpl
 
 
@@ -34,7 +36,7 @@ def _gen_key(key_type: str, key_size: int, logger, label: str = ""):
 def init_root_ca(
     subject: str, key_type: str, key_size: int,
     passphrase: bytes, out_dir: str, validity_days: int,
-    log_file: str | None = None, force: bool = False,
+    db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     """Create self-signed Root CA: key, cert, policy.txt."""
     logger = log_module.setup_logging(log_file)
@@ -48,9 +50,11 @@ def init_root_ca(
     key = _gen_key(key_type, key_size, logger)
 
     logger.info("Starting certificate signing")
+    db_path = db_path or str(out / "micropki.db")
     cert = certificates.build_self_signed_root_ca(
         subject_dn=subject, private_key=key,
         validity_days=validity_days, key_type=key_type, key_size=key_size,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     logger.info("Certificate signing completed successfully")
 
@@ -72,7 +76,7 @@ def issue_intermediate_ca(
     root_cert_path: str, root_key_path: str, root_passphrase: bytes,
     subject: str, key_type: str, key_size: int,
     passphrase: bytes, out_dir: str, validity_days: int,
-    pathlen: int = 0, log_file: str | None = None, force: bool = False,
+    pathlen: int = 0, db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     """Generate Intermediate CA: key, CSR, Root signs it, save, update policy."""
     logger = log_module.setup_logging(log_file)
@@ -92,11 +96,19 @@ def issue_intermediate_ca(
     inter_csr = csr_module.generate_intermediate_csr(subject, inter_key, pathlen)
     logger.info("Intermediate CA CSR generated")
 
+    db_path = db_path or str(out / "micropki.db")
+    database.init_db(db_path)
+
     logger.info("Signing Intermediate CA certificate with Root CA")
     inter_cert = csr_module.sign_intermediate_csr(
         inter_csr, root_cert, root_key, validity_days, pathlen,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     logger.info("Intermediate CA certificate signed (serial=%x)", inter_cert.serial_number)
+
+    # Atomic-as-possible: insert into DB before writing files.
+    _insert_cert_record(db_path, inter_cert)
+    logger.info("Certificate insertion successful: serial=%x, subject=%s", inter_cert.serial_number, subject)
 
     _save_ca_artifacts(out, key_path, cert_path, inter_key, passphrase, inter_cert, logger)
 
@@ -117,7 +129,7 @@ def issue_end_entity(
     ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes,
     template: str, subject: str, san_strings: list[str],
     out_dir: str, validity_days: int,
-    csr_path: str | None = None, log_file: str | None = None,
+    csr_path: str | None = None, db_path: str | None = None, log_file: str | None = None,
 ) -> None:
     """Issue end-entity certificate using a template. Optionally sign external CSR."""
     logger = log_module.setup_logging(log_file)
@@ -130,6 +142,8 @@ def issue_end_entity(
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    db_path = db_path or str((out.parent if out.name == "certs" else out) / "micropki.db")
+    database.init_db(db_path)
     base_name = _safe_filename(_extract_cn(subject))
 
     if csr_path:
@@ -152,6 +166,7 @@ def issue_end_entity(
         subject_dn=subject, public_key=public_key,
         ca_cert=ca_cert, ca_key=ca_key,
         validity_days=validity_days, template_ext=ext,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     san_desc = ", ".join(san_strings) if san_strings else "none"
     logger.info(
@@ -159,6 +174,10 @@ def issue_end_entity(
         cert.serial_number, subject, template, san_desc,
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+
+    # Atomic-as-possible: insert into DB before writing files.
+    _insert_cert_record(db_path, cert)
+    logger.info("Certificate insertion successful: serial=%x, subject=%s", cert.serial_number, subject)
 
     cert_file = out / f"{base_name}.cert.pem"
     cert_file.write_bytes(crypto_utils.cert_to_pem(cert))
@@ -254,3 +273,16 @@ Issuer (Root CA) DN: {issuer_dn}
 """
     with open(policy_path, "a", encoding="utf-8") as f:
         f.write(section)
+
+
+def _insert_cert_record(db_path: str, cert) -> None:
+    database.insert_certificate(
+        db_path,
+        serial_hex=f"{cert.serial_number:X}",
+        subject=cert.subject.rfc4514_string(),
+        issuer=cert.issuer.rfc4514_string(),
+        not_before=cert.not_valid_before_utc.isoformat().replace("+00:00", "Z"),
+        not_after=cert.not_valid_after_utc.isoformat().replace("+00:00", "Z"),
+        cert_pem=crypto_utils.cert_to_pem(cert).decode("utf-8"),
+        status="valid",
+    )

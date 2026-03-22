@@ -209,6 +209,57 @@ openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/intermediate.cert.pem
 openssl verify -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
 ```
 
+## Usage (Sprint 3)
+
+### Initialize certificate database
+
+```powershell
+micropki db init --db-path .\pki\micropki.db
+```
+
+### List certificates from database
+
+```powershell
+micropki ca list-certs --db-path .\pki\micropki.db --status valid --format table
+micropki ca list-certs --db-path .\pki\micropki.db --format json
+```
+
+### Show certificate PEM by serial
+
+```powershell
+micropki ca show-cert 2A7F... --db-path .\pki\micropki.db
+```
+
+### Start repository HTTP server
+
+```powershell
+micropki repo serve --host 127.0.0.1 --port 8080 --db-path .\pki\micropki.db --cert-dir .\pki\certs
+```
+
+### API examples (curl)
+
+```bash
+curl http://127.0.0.1:8080/certificate/2A7F...
+curl http://127.0.0.1:8080/ca/root
+curl http://127.0.0.1:8080/ca/intermediate
+curl http://127.0.0.1:8080/crl
+```
+
+**Windows PowerShell note:** built-in `curl` is an alias to `Invoke-WebRequest` and may show script parsing warnings or throw on non-2xx responses.
+Use one of these:
+
+```powershell
+# Preferred: real curl binary
+curl.exe http://127.0.0.1:8080/certificate/<SERIAL>
+curl.exe http://127.0.0.1:8080/ca/root
+curl.exe http://127.0.0.1:8080/ca/intermediate
+curl.exe -i http://127.0.0.1:8080/crl
+
+# Or PowerShell cmdlet without IE parser
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/certificate/<SERIAL>
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/ca/root
+```
+
 ## Project layout
 
 ```

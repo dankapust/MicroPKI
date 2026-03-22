@@ -21,6 +21,7 @@ env/
 secrets/
 *.pass
 pki/
+*.db
 *.log
 logs/
 
