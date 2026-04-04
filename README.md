@@ -249,16 +249,92 @@ curl http://127.0.0.1:8080/crl
 Use one of these:
 
 ```powershell
-# Preferred: real curl binary
-curl.exe http://127.0.0.1:8080/certificate/<SERIAL>
+# Preferred: real curl binary (use a real hex serial from list-certs — do NOT paste <...> brackets in PowerShell)
+curl.exe http://127.0.0.1:8080/certificate/69D0F0D43DA40F3D
 curl.exe http://127.0.0.1:8080/ca/root
 curl.exe http://127.0.0.1:8080/ca/intermediate
 curl.exe -i http://127.0.0.1:8080/crl
 
 # Or PowerShell cmdlet without IE parser
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/certificate/<SERIAL>
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/certificate/69D0F0D43DA40F3D
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/ca/root
 ```
+
+**PowerShell и символы `<` `>`:** в примерах ниже *не* используйте запись вида `<SERIAL_HEX>` — в PowerShell `<` зарезервирован и даёт ошибку «Оператор "<" зарезервирован…». Подставьте реальный serial из `micropki ca list-certs` или заведите переменную: `$s = "69BEE1AC4AC1B70D"; micropki ca revoke $s --force ...`.
+
+## Usage (Sprint 4) — revocation and CRL
+
+PKI layout includes a `crl/` directory under `--out-dir` (e.g. `pki/crl/root.crl.pem`, `pki/crl/intermediate.crl.pem`). The database gains a `crl_metadata` table (migration runs on `db init` or first use).
+
+### Revoke a certificate (by serial, hex)
+
+```powershell
+# Example serial — замените на свой из list-certs (без угловых скобок)
+micropki ca revoke 69BEE1AC4AC1B70D --reason keyCompromise --db-path .\pki\micropki.db --out-dir .\pki --force
+# или: $s = "69BEE1AC4AC1B70D"; micropki ca revoke $s --reason keyCompromise --force --db-path .\pki\micropki.db --out-dir .\pki
+```
+
+Supported `--reason` values (case-insensitive): `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`, `removeFromCRL`, `privilegeWithdrawn`, `aACompromise`.
+
+Optional: regenerate the issuing CA’s CRL immediately after revoke (default CRL path under `pki\crl\`):
+
+```powershell
+micropki ca revoke 69BEE1AC4AC1B70D --reason superseded --force --crl --ca-pass-file secrets\inter.pass --db-path .\pki\micropki.db --out-dir .\pki
+micropki ca revoke 69BEE1AC4AC1B70D --reason superseded --force --crl .\backup\my.crl.pem --ca-pass-file secrets\inter.pass --db-path .\pki\micropki.db --out-dir .\pki
+```
+
+`--crl` without a path selects `...\crl\root.crl.pem` or `...\crl\intermediate.crl.pem` based on the certificate’s issuer. `--ca-pass-file` is required whenever `--crl` is used.
+
+### Generate or refresh a full CRL
+
+```powershell
+micropki ca gen-crl --ca intermediate --next-update 14 --out-dir .\pki --db-path .\pki\micropki.db --ca-pass-file secrets\inter.pass
+micropki ca gen-crl --ca root --out-file .\backup\root.crl.pem --out-dir .\pki --db-path .\pki\micropki.db --ca-pass-file secrets\ca.pass
+```
+
+If `--ca` is a PEM file path, pass the matching key with `--ca-key`.
+
+### Check revocation status (database, optional CRL file)
+
+```powershell
+micropki ca check-revoked 69BEE1AC4AC1B70D --db-path .\pki\micropki.db
+micropki ca check-revoked 69BEE1AC4AC1B70D --db-path .\pki\micropki.db --crl .\pki\crl\intermediate.crl.pem
+```
+
+### HTTP repository — fetch CRL
+
+Default `GET /crl` returns the **intermediate** CA CRL. Use `?ca=root` for the root CRL. Alternative paths: `/crl/intermediate.crl`, `/crl/root.crl`.
+
+```powershell
+micropki repo serve --host 127.0.0.1 --port 8080 --db-path .\pki\micropki.db --cert-dir .\pki\certs --pki-dir .\pki
+```
+
+```powershell
+curl.exe -i -H "Accept: application/pkix-crl" http://127.0.0.1:8080/crl
+curl.exe -i http://127.0.0.1:8080/crl?ca=root
+curl.exe -i http://127.0.0.1:8080/crl/intermediate.crl
+```
+
+If the CRL file is missing, the server returns **404**. Responses include `Content-Type: application/pkix-crl`, `Last-Modified`, `Cache-Control: max-age=...` (derived from CRL `nextUpdate` when parseable), and `ETag`.
+
+### Verify CRL with OpenSSL
+
+```bash
+openssl crl -inform PEM -in pki/crl/intermediate.crl.pem -text -noout
+openssl crl -in pki/crl/intermediate.crl.pem -inform PEM -CAfile pki/certs/intermediate.cert.pem -noout
+```
+
+The second command should report **`verify OK`** in stderr when the CRL is signed by that CA.
+
+**If `openssl` is not installed** (typical on Windows), inspect the CRL with Python (uses the same `cryptography` library as MicroPKI):
+
+```powershell
+python -c "from cryptography import x509; from pathlib import Path; c=x509.load_pem_x509_crl(Path('pki/crl/intermediate.crl.pem').read_bytes()); n=c.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number; print('CRL Number:', n); print('Revoked:', [hex(r.serial_number) for r in c])"
+```
+
+### Verify a revoked certificate (conceptual)
+
+MicroPKI does not terminate TLS for you. To experiment with OpenSSL revocation checking you need a TLS server that serves the revoked leaf, plus a trust/chain setup and `openssl s_client -crl_check` (see Sprint 4 technical doc). Locally you can confirm revocation via `ca check-revoked`, the database, and the CRL PEM contents (`openssl crl -text` or the Python one-liner above).
 
 ## Project layout
 
@@ -266,15 +342,19 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8080/ca/root
 micropki/
   __init__.py
   __main__.py       # python -m micropki
-  cli.py            # argument parser: ca init, issue-intermediate, issue-cert, verify, verify-chain
-  ca.py             # Root CA init, Intermediate CA, end-entity issuance, verify
+  cli.py            # argument parser: ca, db, repo (incl. revoke, gen-crl, check-revoked)
+  ca.py             # Root CA init, Intermediate CA, end-entity issuance, verify, CA path resolution
   certificates.py   # X.509 build and extensions, DN parsing
   csr.py            # CSR generation, Intermediate/end-entity signing
+  crl.py            # CRL build/sign (RFC 5280), CRL number + metadata persistence
+  revocation.py     # Revocation reasons, DB revoke workflow
   templates.py      # Certificate templates (server, client, code_signing), SAN parsing
   chain.py          # Chain validation: signatures, validity, constraints
   crypto_utils.py   # PEM, key generation, encryption, passphrase loading
+  database.py       # SQLite schema, certificates + crl_metadata
+  repository.py     # HTTP repository (certificates, CA PEMs, CRL)
   logger.py         # logging setup (file/stderr, ISO 8601)
-tests/              # pytest (50 tests)
+tests/              # pytest (includes Sprint 4 CRL/revocation tests)
 scripts/            # verify_key_cert_match.py
 requirements.txt
 pyproject.toml

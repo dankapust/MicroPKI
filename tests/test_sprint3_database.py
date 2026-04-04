@@ -99,7 +99,7 @@ def test_issue_5_certs_and_db_records(s3_env):
 
     rows = database.list_certificates(str(db_path))
     serials = [r["serial_hex"] for r in rows]
-    assert len(rows) >= 6  # includes intermediate + 5 leafs
+    assert len(rows) >= 6
     assert len(serials) == len(set(serials))
 
 
@@ -117,6 +117,5 @@ def test_ca_list_and_show_cert_cli(s3_env):
 
 
 def test_serial_uniqueness_stress():
-    # Generator-level uniqueness check in-memory for 100 serials.
     vals = [serial.generate_serial_candidate() for _ in range(100)]
     assert len(vals) == len(set(vals))

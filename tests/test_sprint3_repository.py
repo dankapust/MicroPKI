@@ -77,6 +77,14 @@ def repo_env(tmp_path_factory):
         "--san", "dns:repo.example.com",
         "--out-dir", str(certs), "--db-path", str(db),
     )[0] == 0
+    assert _run(
+        "ca", "gen-crl",
+        "--ca", "intermediate",
+        "--out-dir", str(out),
+        "--db-path", str(db),
+        "--ca-pass-file", str(secrets / "inter.pass"),
+        "--next-update", "7",
+    )[0] == 0
 
     return {"out": out, "certs": certs, "db": db}
 
@@ -90,17 +98,14 @@ def test_repository_endpoints(repo_env):
     time.sleep(0.2)
     base = f"http://127.0.0.1:{port}"
 
-    # /ca/root
     st, body = _http_get(f"{base}/ca/root")
     assert st == 200
     assert "BEGIN CERTIFICATE" in body
 
-    # /ca/intermediate
     st, body = _http_get(f"{base}/ca/intermediate")
     assert st == 200
     assert "BEGIN CERTIFICATE" in body
 
-    # /certificate/<serial>
     code, out, err = _run("ca", "list-certs", "--db-path", str(repo_env["db"]), "--format", "json")
     assert code == 0, err
     import json
@@ -109,15 +114,13 @@ def test_repository_endpoints(repo_env):
     assert st == 200
     assert "BEGIN CERTIFICATE" in body
 
-    # /certificate/XYZ -> 400
     with pytest.raises(urllib.error.HTTPError) as e:
         _http_get(f"{base}/certificate/XYZ")
     assert e.value.code == 400
 
-    # /crl -> 501
-    with pytest.raises(urllib.error.HTTPError) as e2:
-        _http_get(f"{base}/crl")
-    assert e2.value.code == 501
+    st, body = _http_get(f"{base}/crl")
+    assert st == 200
+    assert "BEGIN X509 CRL" in body
 
     server.shutdown()
     server.server_close()

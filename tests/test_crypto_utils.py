@@ -18,7 +18,6 @@ def test_generate_rsa_key():
 def test_generate_ecc_key():
     """ECC key is on P-384 curve."""
     key = crypto_utils.generate_ecc_key(384)
-    # curve is SECP384R1
     assert key.curve.name == "secp384r1"
 
 
@@ -64,7 +63,6 @@ def test_encrypted_key_roundtrip():
         path = f.name
     try:
         loaded = crypto_utils.load_private_key_encrypted(path, passphrase)
-        # Sign with loaded key and verify with original public key
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         msg = b"test message"

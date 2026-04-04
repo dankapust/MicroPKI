@@ -10,10 +10,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
 
-# ---------------------------------------------------------------------------
-# Common helpers (used across certificates.py, csr.py, chain.py, ca.py)
-# ---------------------------------------------------------------------------
-
 def make_serial() -> int:
     """CSPRNG serial number, ≤159 bits, positive (RFC 5280)."""
     serial = int.from_bytes(os.urandom(19), "big")
@@ -59,10 +55,6 @@ def is_rsa_key(key) -> bool:
     return isinstance(key, (rsa.RSAPrivateKey, rsa.RSAPublicKey))
 
 
-# ---------------------------------------------------------------------------
-# Passphrase
-# ---------------------------------------------------------------------------
-
 def load_passphrase(path: str) -> bytes:
     """Read passphrase from file, strip trailing newline. Never log content."""
     p = Path(path)
@@ -73,10 +65,6 @@ def load_passphrase(path: str) -> bytes:
     return p.read_bytes().rstrip(b"\n\r")
 
 
-# ---------------------------------------------------------------------------
-# Key generation (legacy wrappers, kept for backward compat with tests)
-# ---------------------------------------------------------------------------
-
 def generate_rsa_key(bits: int = 4096) -> rsa.RSAPrivateKey:
     return generate_key("rsa", bits)
 
@@ -86,10 +74,6 @@ def generate_ecc_key(curve_bits: int = 384):
         raise ValueError("Only P-256 (256) and P-384 (384) are supported for ECC")
     return generate_key("ecc", curve_bits)
 
-
-# ---------------------------------------------------------------------------
-# PEM serialization
-# ---------------------------------------------------------------------------
 
 def private_key_to_pem_encrypted(key, passphrase: bytes) -> bytes:
     """Serialize private key to PEM with AES (BestAvailableEncryption / PKCS#8)."""
@@ -113,10 +97,6 @@ def cert_to_pem(cert) -> bytes:
     """Serialize X.509 certificate to PEM (RFC 7468)."""
     return cert.public_bytes(serialization.Encoding.PEM)
 
-
-# ---------------------------------------------------------------------------
-# File I/O with permissions
-# ---------------------------------------------------------------------------
 
 def _set_permissions(path_obj: Path, mode: int, logger=None) -> None:
     try:
@@ -152,10 +132,6 @@ def ensure_private_dir_permissions(dir_path: str, logger=None) -> None:
     p.mkdir(parents=True, exist_ok=True)
     _set_permissions(p, 0o700, logger)
 
-
-# ---------------------------------------------------------------------------
-# Load / deserialize
-# ---------------------------------------------------------------------------
 
 def load_private_key_encrypted(path: str, passphrase: bytes):
     """Load PKCS#8 encrypted private key from PEM file."""

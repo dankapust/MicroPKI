@@ -19,7 +19,7 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str) -> None:
-    """Initialize schema (idempotent) and indexes."""
+    """Initialize schema (idempotent), indexes, and migrate to latest version."""
     with connect(db_path) as conn:
         conn.execute(
             """
@@ -40,7 +40,27 @@ def init_db(db_path: str) -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_certificates_serial ON certificates(serial_hex)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_certificates_status ON certificates(status)")
-        conn.execute("PRAGMA user_version = 1")
+
+        uv = conn.execute("PRAGMA user_version").fetchone()[0]
+        if uv < 2:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS crl_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ca_subject TEXT NOT NULL UNIQUE,
+                    crl_number INTEGER NOT NULL,
+                    last_generated TEXT NOT NULL,
+                    next_update TEXT NOT NULL,
+                    crl_path TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_crl_metadata_ca_subject "
+                "ON crl_metadata(ca_subject)"
+            )
+            conn.execute("PRAGMA user_version = 2")
+
         conn.commit()
 
 
@@ -108,7 +128,7 @@ def update_certificate_status(
     revocation_reason: str | None = None,
     revocation_date: str | None = None,
 ) -> int:
-    """Stub-ready status updater for Sprint 4."""
+    """Update certificate status (e.g. revocation). Returns number of rows updated."""
     with connect(db_path) as conn:
         cur = conn.execute(
             """
@@ -126,3 +146,23 @@ def get_revoked_certificates(db_path: str):
     with connect(db_path) as conn:
         cur = conn.execute("SELECT * FROM certificates WHERE status = 'revoked' ORDER BY revocation_date DESC")
         return cur.fetchall()
+
+
+def list_revoked_by_issuer(db_path: str, issuer_dn: str):
+    """All revoked certificates issued by CA with subject DN matching issuer field (RFC4514)."""
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT * FROM certificates
+            WHERE status = 'revoked' AND issuer = ?
+            ORDER BY revocation_date ASC
+            """,
+            (issuer_dn,),
+        )
+        return cur.fetchall()
+
+
+def get_crl_metadata_row(db_path: str, ca_subject: str):
+    with connect(db_path) as conn:
+        cur = conn.execute("SELECT * FROM crl_metadata WHERE ca_subject = ?", (ca_subject,))
+        return cur.fetchone()

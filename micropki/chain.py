@@ -70,7 +70,6 @@ def validate_chain(
         check_basic_constraints_ca(inter, expect_ca=True)
     check_basic_constraints_ca(root, expect_ca=True)
 
-    # Verify signatures along the chain
     issuers = intermediates + [root] if intermediates else [root]
     subjects = [leaf] + intermediates
     for subject_cert, issuer_cert in zip(subjects, issuers):
