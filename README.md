@@ -12,7 +12,7 @@ A minimal, single-handed PKI implementation for learning and demonstration. Esta
 ```bash
 # Clone the repository (if from remote)
 # git clone <repo-url>
-# cd Kripta
+# cd MicroPKI
 
 # Create virtual environment (recommended)
 python -m venv venv
@@ -169,6 +169,35 @@ openssl x509 -in pki/certs/ca.cert.pem -text -noout
 openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/ca.cert.pem
 ```
 
+## Usage (Sprint 3)
+
+### Initialize the certificate database
+
+```bash
+micropki db init --db-path ./pki/micropki.db
+```
+
+### Start the repository HTTP server
+
+```bash
+micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs
+```
+
+### Example API requests (curl)
+
+# Retrieve a certificate by serial
+$ curl http://localhost:8080/certificate/2A7F... --output cert.pem
+
+# Retrieve the Root CA certificate
+$ curl http://localhost:8080/ca/root --output root.pem
+
+# Retrieve the Intermediate CA certificate
+$ curl http://localhost:8080/ca/intermediate --output intermediate.pem
+
+# CRL endpoint
+$ curl http://localhost:8080/crl?ca=intermediate --output intermediate.crl.pem
+$ openssl crl -inform PEM -in intermediate.crl.pem -text -noout
+
 ## Usage (Sprint 2)
 
 ### Create Intermediate CA signed by Root CA
@@ -209,21 +238,41 @@ openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/intermediate.cert.pem
 openssl verify -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
 ```
 
+## Usage (Sprint 4)
+
+### Revoke a certificate
+
+```bash
+micropki ca revoke <serial_hex> --reason keyCompromise --db-path ./pki/micropki.db
+```
+Supported reasons include: `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`, `removeFromCRL`, `privilegeWithdrawn`, `aACompromise`.
+
+### Generate CRL
+
+```bash
+micropki ca gen-crl --ca-cert pki/certs/intermediate.cert.pem --ca-key pki/private/intermediate.key.pem --ca-pass-file secrets/inter.pass --out-dir ./pki --db-path ./pki/micropki.db --next-update 7
+```
+
 ## Project layout
 
 ```
 micropki/
   __init__.py
   __main__.py       # python -m micropki
-  cli.py            # argument parser: ca init, issue-intermediate, issue-cert, verify, verify-chain
+  cli.py            # argument parser: ca init, issue-intermediate, issue-cert, verify, verify-chain, revoke, gen-crl
   ca.py             # Root CA init, Intermediate CA, end-entity issuance, verify
   certificates.py   # X.509 build and extensions, DN parsing
+  crl.py            # CRL generation tools
   csr.py            # CSR generation, Intermediate/end-entity signing
+  database.py       # SQLite certificate and CRL metadata storage
+  repo.py           # HTTP Server for certificates and CRL distribution
+  repository.py     # Database CRUD operations
+  revocation.py     # Certificate revocation handling
   templates.py      # Certificate templates (server, client, code_signing), SAN parsing
   chain.py          # Chain validation: signatures, validity, constraints
   crypto_utils.py   # PEM, key generation, encryption, passphrase loading
   logger.py         # logging setup (file/stderr, ISO 8601)
-tests/              # pytest (50 tests)
+tests/              # pytest
 scripts/            # verify_key_cert_match.py
 requirements.txt
 pyproject.toml

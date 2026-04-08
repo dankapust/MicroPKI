@@ -1,0 +1,25 @@
+MicroPKI Certificate Policy Document
+=====================================
+Policy Version: 1.0
+Creation Date: 2026-04-06 15:04:30 UTC
+
+CA Name (Subject DN): /CN=Root CA
+Certificate Serial Number (hex): e20489aab7439227a7e1916bc3dce244bec661
+Validity Period:
+  NotBefore: 2026-04-06 15:04:30 UTC
+  NotAfter:  2036-04-03 15:04:30 UTC
+Key Algorithm and Size: RSA-4096
+
+Purpose: Root CA for MicroPKI demonstration. This CA is the trust anchor
+for the MicroPKI PKI. Use only in non-production or lab environments.
+
+Intermediate CA
+---------------
+CA Name (Subject DN): /CN=Intermediate CA
+Certificate Serial Number (hex): 98e71dc312a98df26ac53639446fbba73ca6db
+Validity Period:
+  NotBefore: 2026-04-06 15:04:32 UTC
+  NotAfter:  2031-04-05 15:04:32 UTC
+Key Algorithm and Size: RSA-4096
+Path Length Constraint: 0
+Issuer (Root CA) DN: CN=Root CA

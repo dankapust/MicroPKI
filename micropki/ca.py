@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from . import certificates
 from . import crypto_utils
 from . import csr as csr_module
 from . import logger as log_module
+from . import repository
+from . import serial
 from . import templates as tmpl
 
 
@@ -56,6 +59,22 @@ def init_root_ca(
 
     _save_ca_artifacts(out, key_path, cert_path, key, passphrase, cert, logger)
 
+    # Insert Root CA into DB
+    try:
+        repository.insert_certificate(
+            serial_number=cert.serial_number,
+            subject=cert.subject.rfc4514_string(),
+            issuer=cert.issuer.rfc4514_string(),
+            not_before=cert.not_valid_before_utc.isoformat(),
+            not_after=cert.not_valid_after_utc.isoformat(),
+            cert_pem=cert_path.read_text(encoding="utf-8"),
+            status="valid",
+            db_path=out / "micropki.db",
+            log_file=log_file
+        )
+    except Exception as e:
+        logger.warning("Could not insert Root CA into DB: %s", e)
+
     algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
     policy_path.write_text(_build_root_policy(
         subject, f"{cert.serial_number:x}",
@@ -99,6 +118,22 @@ def issue_intermediate_ca(
     logger.info("Intermediate CA certificate signed (serial=%x)", inter_cert.serial_number)
 
     _save_ca_artifacts(out, key_path, cert_path, inter_key, passphrase, inter_cert, logger)
+
+    # Insert Intermediate CA into DB
+    try:
+        repository.insert_certificate(
+            serial_number=inter_cert.serial_number,
+            subject=inter_cert.subject.rfc4514_string(),
+            issuer=inter_cert.issuer.rfc4514_string(),
+            not_before=inter_cert.not_valid_before_utc.isoformat(),
+            not_after=inter_cert.not_valid_after_utc.isoformat(),
+            cert_pem=cert_path.read_text(encoding="utf-8"),
+            status="valid",
+            db_path=out / "micropki.db",
+            log_file=log_file
+        )
+    except Exception as e:
+        logger.warning("Could not insert Intermediate CA into DB: %s", e)
 
     algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
     _append_intermediate_policy(
@@ -164,13 +199,37 @@ def issue_end_entity(
     cert_file.write_bytes(crypto_utils.cert_to_pem(cert))
     logger.info("Saved certificate to %s", str(cert_file.resolve()))
 
+    # Insert certificate into database
+    try:
+        # Determine DB path relative to out_dir
+        # If out_dir is 'pki/certs', DB should be in 'pki/micropki.db'
+        db_path = out.parent / "micropki.db" if out.name == "certs" else out / "micropki.db"
+        
+        repository.insert_certificate(
+            serial_number=cert.serial_number,
+            subject=cert.subject.rfc4514_string(),
+            issuer=cert.issuer.rfc4514_string(),
+            not_before=cert.not_valid_before_utc.isoformat(),
+            not_after=cert.not_valid_after_utc.isoformat(),
+            cert_pem=cert_file.read_text(encoding="utf-8"),
+            status="valid",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            db_path=db_path,
+            log_file=log_file
+        )
+        logger.info("Certificate inserted into database: serial=%x, subject=%s", cert.serial_number, cert.subject)
+    except Exception as e:
+        logger.error("Failed to insert certificate into database: %s", e)
+        # Not raising here to still allow key saving if issuance succeeded
+        print(f"Warning: Failed to store certificate in the database: {e}", file=sys.stderr)
+
     if leaf_key is not None:
         key_file = out / f"{base_name}.key.pem"
         crypto_utils.write_private_key_unencrypted(str(key_file), leaf_key, logger=logger)
 
 
 # ---------------------------------------------------------------------------
-# Verification (Sprint 1 + Sprint 2)
+# Verification
 # ---------------------------------------------------------------------------
 
 def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:

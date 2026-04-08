@@ -8,7 +8,10 @@ from pathlib import Path
 
 from . import ca
 from . import crypto_utils
+from . import database
 from . import logger as log_module
+from . import repository
+from . import serial
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +257,144 @@ def cmd_ca_verify_chain(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ca revoke (Sprint 4)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_revoke(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import revocation
+    try:
+        if not args.force:
+            ans = input(f"Are you sure you want to revoke {args.serial}? [y/N]: ")
+            if ans.lower() != 'y':
+                print("Aborted.")
+                return 0
+        revocation.revoke(args.db_path, args.serial, args.reason, log_file=args.log_file)
+        print(f"Revoked {args.serial}")
+        return 0
+    except Exception as e:
+        log.error("Revocation failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# ca gen-crl (Sprint 4)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_gen_crl(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import crl
+    
+    parser = getattr(args, "_parser", argparse.ArgumentParser())
+    _validate_file_exists(parser, args.ca_cert, "--ca-cert")
+    _validate_file_exists(parser, args.ca_key, "--ca-key")
+    _validate_passphrase_file(parser, args.ca_pass_file, "--ca-pass-file")
+
+    try:
+        ca_pass = crypto_utils.load_passphrase(args.ca_pass_file)
+    except Exception as e:
+        log.error("Cannot read passphrase file: %s", e)
+        print("Error: could not read passphrase file.", file=sys.stderr)
+        return 1
+
+    try:
+        out_path = crl.generate_crl(
+            ca_cert_path=args.ca_cert,
+            ca_key_path=args.ca_key,
+            ca_passphrase=ca_pass,
+            out_dir=args.out_dir,
+            db_path=args.db_path,
+            next_update_days=args.next_update,
+            out_file=getattr(args, "out_file", None),
+            log_file=args.log_file
+        )
+        print(f"CRL generated at {out_path}")
+        return 0
+    except Exception as e:
+        log.error("CRL generation failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# ca check-revoked (Sprint 4, CLI-20)
+# ---------------------------------------------------------------------------
+
+def cmd_ca_check_revoked(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import revocation
+    try:
+        status_info = revocation.check_revocation(args.db_path, args.serial)
+        print(f"Certificate {status_info['serial']}:")
+        print(f"  Status: {status_info['status']}")
+        if status_info['status'] == 'revoked':
+            print(f"  Reason: {status_info['reason']}")
+            print(f"  Date:   {status_info['date']}")
+        return 0
+    except Exception as e:
+        log.error("Check revocation failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+
+# --- commands missing from original, some might be unimplemented but need parser
+def cmd_db_init(args):
+    from . import database
+    db_path = getattr(args, "db_path", "./pki/micropki.db")
+    log_file = getattr(args, "log_file", None)
+    log = log_module.setup_logging(log_file)
+    try:
+        database.init_database(db_path)
+        log.info("Database initialized at %s", db_path)
+        return 0
+    except Exception as e:
+        log.error("Database initialization failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+def cmd_ca_list_certs(args):
+    from . import repository
+    try:
+        certs = repository.list_certificates(status=getattr(args, "status", None), db_path=args.db_path)
+        if not certs:
+            print("No certificates found.", file=sys.stderr)
+            return 0
+        
+        print(f"{'SERIAL':<40} | {'STATUS':<10} | {'NOT AFTER':<20} | {'SUBJECT'}")
+        print("-" * 100)
+        for cert in certs:
+            print(f"{cert['serial_number']:<40} | {cert['status']:<10} | {cert['not_after'][:19]:<20} | {cert['subject']}")
+        return 0
+    except Exception as e:
+        print(f"Error listing certificates: {e}", file=sys.stderr)
+        return 1
+
+def cmd_ca_show_cert(args):
+    from . import repository
+    try:
+        serial_number = int(args.serial, 16)
+        cert = repository.get_certificate_by_serial(serial_number, db_path=args.db_path)
+        if not cert:
+            print(f"Certificate not found: {args.serial}", file=sys.stderr)
+            return 1
+        
+        for k, v in cert.items():
+            print(f"{k}: {v}")
+        return 0
+    except ValueError:
+        print(f"Invalid serial format: {args.serial}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error showing certificate: {e}", file=sys.stderr)
+        return 1
+
+def cmd_repo_serve(args):
+    pass # Implemented in repo.py maybe? Will fix below.
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -263,6 +404,40 @@ def main() -> None:
 
     ca_parser = subparsers.add_parser("ca", help="CA operations")
     ca_sub = ca_parser.add_subparsers(dest="ca_command")
+
+    # --- db init ---
+    p = subparsers.add_parser("db", help="Database operations")
+    db_sub = p.add_subparsers(dest="db_command")
+    p_init = db_sub.add_parser("init", help="Initialise the certificate database")
+    p_init.set_defaults(_parser=p_init, _run=cmd_db_init)
+    p_init.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
+    p_init.add_argument("--log-file", default=None)
+
+    # --- ca list-certs ---
+    p = ca_sub.add_parser("list-certs", help="List all issued certificates")
+    p.set_defaults(_parser=p, _run=cmd_ca_list_certs)
+    p.add_argument("--status", choices=["valid", "revoked", "expired"], help="Filter by certificate status")
+    p.add_argument("--format", choices=["table", "json", "csv"], default="table", help="Output format")
+    p.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
+    p.add_argument("--log-file", default=None)
+
+    # --- ca show-cert ---
+    p = ca_sub.add_parser("show-cert", help="Show a specific certificate by serial number")
+    p.set_defaults(_parser=p, _run=cmd_ca_show_cert)
+    p.add_argument("serial", help="Serial number of the certificate (hex)")
+    p.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
+    p.add_argument("--log-file", default=None)
+
+    # --- repo serve ---
+    p = subparsers.add_parser("repo", help="Repository server operations")
+    repo_sub = p.add_subparsers(dest="repo_command")
+    p_serve = repo_sub.add_parser("serve", help="Start the repository HTTP server")
+    p_serve.set_defaults(_parser=p_serve, _run=cmd_repo_serve)
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind address")
+    p_serve.add_argument("--port", type=int, default=8080, help="TCP port")
+    p_serve.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
+    p_serve.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates")
+    p_serve.add_argument("--log-file", default=None)
 
     # --- ca init ---
     p = ca_sub.add_parser("init", help="Create self-signed Root CA")
@@ -320,6 +495,34 @@ def main() -> None:
     p.add_argument("--root", required=True, help="Root CA cert PEM")
     p.add_argument("--log-file", default=None)
 
+    # --- ca revoke ---
+    p = ca_sub.add_parser("revoke", help="Revoke a certificate")
+    p.set_defaults(_run=cmd_ca_revoke)
+    p.add_argument("serial", help="Serial number of the certificate to revoke (hex)")
+    p.add_argument("--reason", default="unspecified", help="Revocation reason code")
+    p.add_argument("--db-path", default="./pki/micropki.db", help="Path to DB")
+    p.add_argument("--force", action="store_true", help="Skip confirmation")
+    p.add_argument("--log-file", default=None)
+
+    # --- ca gen-crl ---
+    p = ca_sub.add_parser("gen-crl", help="Generate CRL for a CA")
+    p.set_defaults(_parser=p, _run=cmd_ca_gen_crl)
+    p.add_argument("--ca-cert", required=True, help="CA cert PEM")
+    p.add_argument("--ca-key", required=True, help="CA encrypted key PEM")
+    p.add_argument("--ca-pass-file", required=True, help="CA passphrase file")
+    p.add_argument("--out-dir", default="./pki")
+    p.add_argument("--out-file", default=None, help="Custom output file for CRL")
+    p.add_argument("--next-update", type=int, default=7, help="Days until next update")
+    p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--log-file", default=None)
+
+    # --- ca check-revoked ---
+    p = ca_sub.add_parser("check-revoked", help="Check revocation status of a certificate")
+    p.set_defaults(_run=cmd_ca_check_revoked)
+    p.add_argument("serial", help="Serial number of the certificate (hex)")
+    p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--log-file", default=None)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -333,6 +536,24 @@ def main() -> None:
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
+    elif args.command == "db":
+        if not getattr(args, "db_command", None):
+            parser.print_help()
+            sys.exit(0)
+        run = getattr(args, "_run", None)
+        if run:
+            sys.exit(run(args))
+    elif args.command == "repo":
+        if not getattr(args, "repo_command", None):
+            parser.print_help()
+            sys.exit(0)
+        run = getattr(args, "_run", None)
+        if run:
+            # Need to call repo logic instead of empty function
+            import uvicorn
+            from .repo import init_server, app
+            init_server(log_file=args.log_file, cert_dir=args.cert_dir)
+            sys.exit(uvicorn.run(app, host=args.host, port=args.port, log_level="info"))
 
     sys.exit(0)
 
