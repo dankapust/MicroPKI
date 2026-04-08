@@ -18,8 +18,6 @@ def _run(*args):
     return result.returncode, result.stdout, result.stderr
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────
-
 @pytest.fixture(scope="module")
 def pki_dir(tmp_path_factory):
     """Set up Root CA + Intermediate CA once for the module."""
@@ -30,7 +28,6 @@ def pki_dir(tmp_path_factory):
     (secrets / "inter.pass").write_bytes(b"interpass")
     out = base / "pki"
 
-    # Root CA
     code, _, err = _run(
         "ca", "init",
         "--subject", "/CN=Test Root CA",
@@ -40,7 +37,6 @@ def pki_dir(tmp_path_factory):
     )
     assert code == 0, err
 
-    # Intermediate CA
     code, _, err = _run(
         "ca", "issue-intermediate",
         "--root-cert", str(out / "certs" / "ca.cert.pem"),
@@ -56,8 +52,6 @@ def pki_dir(tmp_path_factory):
     assert code == 0, err
     return base
 
-
-# ── Intermediate CA ───────────────────────────────────────────────────────
 
 def test_intermediate_cert_exists(pki_dir):
     assert (pki_dir / "pki" / "certs" / "intermediate.cert.pem").exists()
@@ -88,8 +82,6 @@ def test_intermediate_extensions(pki_dir):
     cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
     cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
 
-
-# ── Server certificate ────────────────────────────────────────────────────
 
 def test_issue_server_cert(pki_dir):
     out = pki_dir / "pki" / "certs"
@@ -124,8 +116,6 @@ def test_issue_server_cert(pki_dir):
     assert "www.example.com" in dns_names
 
 
-# ── Client certificate ────────────────────────────────────────────────────
-
 def test_issue_client_cert(pki_dir):
     out = pki_dir / "pki" / "certs"
     code, _, err = _run(
@@ -147,8 +137,6 @@ def test_issue_client_cert(pki_dir):
     assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
 
 
-# ── Code signing certificate ──────────────────────────────────────────────
-
 def test_issue_code_signing_cert(pki_dir):
     out = pki_dir / "pki" / "certs"
     code, _, err = _run(
@@ -169,8 +157,6 @@ def test_issue_code_signing_cert(pki_dir):
     assert ExtendedKeyUsageOID.CODE_SIGNING in eku.value
 
 
-# ── Chain validation (TEST-7) ─────────────────────────────────────────────
-
 def test_verify_chain(pki_dir):
     out = pki_dir / "pki"
     code, stdout, err = _run(
@@ -182,8 +168,6 @@ def test_verify_chain(pki_dir):
     assert code == 0, err
     assert "OK" in stdout
 
-
-# ── Negative tests (TEST-10) ──────────────────────────────────────────────
 
 def test_server_cert_without_san_fails(pki_dir):
     """Server certificate without SAN must fail."""

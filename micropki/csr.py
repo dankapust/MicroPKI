@@ -42,6 +42,7 @@ def sign_intermediate_csr(
     root_key: rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey,
     validity_days: int,
     path_length: int = 0,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """
     Root CA signs Intermediate CSR → X.509v3 certificate (PKI-7).
@@ -53,7 +54,7 @@ def sign_intermediate_csr(
         .subject_name(csr.subject)
         .issuer_name(root_cert.subject)
         .public_key(csr.public_key())
-        .serial_number(make_serial())
+        .serial_number(serial_number or make_serial())
         .not_valid_before(not_before)
         .not_valid_after(not_before + timedelta(days=validity_days))
         .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
@@ -79,6 +80,7 @@ def issue_end_entity_cert(
     ca_key: rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey,
     validity_days: int,
     template_ext: TemplateExtensions,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """Issue end-entity certificate signed by CA (PKI-8). Extensions from template."""
     not_before = datetime.now(timezone.utc)
@@ -87,7 +89,7 @@ def issue_end_entity_cert(
         .subject_name(parse_subject_dn(subject_dn))
         .issuer_name(ca_cert.subject)
         .public_key(public_key)
-        .serial_number(make_serial())
+        .serial_number(serial_number or make_serial())
         .not_valid_before(not_before)
         .not_valid_after(not_before + timedelta(days=validity_days))
         .add_extension(template_ext.basic_constraints, critical=template_ext.basic_constraints_critical)

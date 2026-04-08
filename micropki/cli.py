@@ -1,4 +1,4 @@
-"""CLI: micropki ca init|issue-intermediate|issue-cert|verify|verify-chain."""
+"""CLI: ca/db/repo commands for MicroPKI."""
 
 from __future__ import annotations
 
@@ -7,16 +7,14 @@ import sys
 from pathlib import Path
 
 from . import ca
+from . import crl as crl_module
+from . import database
 from . import crypto_utils
 from . import database
 from . import logger as log_module
 from . import repository
 from . import serial
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _validate_file_exists(parser, path, label):
     if not path or not Path(path).is_file():
@@ -61,9 +59,20 @@ def _validate_out_dir(parser, out_dir):
         parser.error(f"--out-dir must be writable: {out_dir}")
 
 
-# ---------------------------------------------------------------------------
-# ca init (Sprint 1)
-# ---------------------------------------------------------------------------
+def _default_db_path_for_out_dir(out_dir: str) -> str:
+    out = Path(out_dir)
+    if out.name == "certs":
+        return str(out.parent / "micropki.db")
+    return str(out / "micropki.db")
+
+
+def _validate_key_type_size(parser, key_type: str, key_size: int) -> None:
+    key_type = (key_type or "").lower()
+    if key_type == "rsa" and key_size not in (2048, 4096):
+        parser.error("--key-size must be 2048 or 4096 for RSA")
+    if key_type == "ecc" and key_size not in (256, 384):
+        parser.error("--key-size must be 256 or 384 for ECC")
+
 
 def cmd_ca_init(args) -> int:
     parser = getattr(args, "_parser", argparse.ArgumentParser())
@@ -101,6 +110,7 @@ def cmd_ca_init(args) -> int:
             passphrase=passphrase,
             out_dir=out_dir,
             validity_days=args.validity_days,
+            db_path=args.db_path,
             log_file=args.log_file,
             force=getattr(args, "force", False),
         )
@@ -114,10 +124,6 @@ def cmd_ca_init(args) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# ca issue-intermediate (Sprint 2)
-# ---------------------------------------------------------------------------
-
 def cmd_ca_issue_intermediate(args) -> int:
     parser = getattr(args, "_parser", argparse.ArgumentParser())
     log = log_module.setup_logging(getattr(args, "log_file", None))
@@ -127,6 +133,9 @@ def cmd_ca_issue_intermediate(args) -> int:
     _validate_passphrase_file(parser, args.root_pass_file, "--root-pass-file")
     _validate_passphrase_file(parser, args.passphrase_file, "--passphrase-file")
     _validate_subject(parser, args)
+    _validate_key_type_size(parser, args.key_type, args.key_size)
+    if args.pathlen < 0:
+        parser.error("--pathlen must be >= 0")
     out_dir = args.out_dir or "./pki"
     _validate_out_dir(parser, out_dir)
 
@@ -150,6 +159,7 @@ def cmd_ca_issue_intermediate(args) -> int:
             out_dir=out_dir,
             validity_days=args.validity_days,
             pathlen=args.pathlen,
+            db_path=args.db_path,
             log_file=args.log_file,
             force=getattr(args, "force", False),
         )
@@ -162,10 +172,6 @@ def cmd_ca_issue_intermediate(args) -> int:
         return 1
     return 0
 
-
-# ---------------------------------------------------------------------------
-# ca issue-cert (Sprint 2)
-# ---------------------------------------------------------------------------
 
 def cmd_ca_issue_cert(args) -> int:
     parser = getattr(args, "_parser", argparse.ArgumentParser())
@@ -196,6 +202,7 @@ def cmd_ca_issue_cert(args) -> int:
             out_dir=out_dir,
             validity_days=args.validity_days,
             csr_path=getattr(args, "csr", None),
+            db_path=args.db_path,
             log_file=args.log_file,
         )
     except ValueError as e:
@@ -209,9 +216,58 @@ def cmd_ca_issue_cert(args) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# ca verify (Sprint 1)
-# ---------------------------------------------------------------------------
+def cmd_ca_list_certs(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    try:
+        status_filter = args.status if args.status in ("valid", "revoked") else None
+        rows = database.list_certificates(args.db_path, status=status_filter)
+        if args.status == "expired":
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            rows = [r for r in rows if datetime.fromisoformat(r["not_after"].replace("Z", "+00:00")) < now]
+    except Exception as e:
+        log.error("Database query failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        import json
+        print(json.dumps([dict(r) for r in rows], ensure_ascii=False, indent=2))
+        return 0
+    if args.format == "csv":
+        print("serial,subject,expiration,status")
+        for r in rows:
+            print(f"{r['serial_hex']},{r['subject']},{r['not_after']},{r['status']}")
+        return 0
+
+    print(f"{'SERIAL':<20} {'STATUS':<8} {'EXPIRES':<22} SUBJECT")
+    print("-" * 95)
+    for r in rows:
+        print(f"{r['serial_hex']:<20} {r['status']:<8} {r['not_after']:<22} {r['subject']}")
+    return 0
+
+
+def cmd_ca_show_cert(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    serial_hex = args.serial.strip()
+    try:
+        int(serial_hex, 16)
+    except ValueError:
+        print("Error: serial must be hex", file=sys.stderr)
+        return 1
+    try:
+        row = database.get_certificate_by_serial(args.db_path, serial_hex)
+    except Exception as e:
+        log.error("Database query failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    if row is None:
+        print("Error: certificate not found", file=sys.stderr)
+        return 1
+    log.info("Certificate retrieval via ca show-cert: serial=%s", serial_hex.upper())
+    print(row["cert_pem"])
+    return 0
+
 
 def cmd_ca_verify(args) -> int:
     cert_path = getattr(args, "cert", None)
@@ -227,10 +283,6 @@ def cmd_ca_verify(args) -> int:
         print(f"Verification failed: {e}", file=sys.stderr)
         return 1
 
-
-# ---------------------------------------------------------------------------
-# ca verify-chain (Sprint 2, TEST-7)
-# ---------------------------------------------------------------------------
 
 def cmd_ca_verify_chain(args) -> int:
     log = log_module.setup_logging(getattr(args, "log_file", None))
@@ -404,6 +456,10 @@ def main() -> None:
 
     ca_parser = subparsers.add_parser("ca", help="CA operations")
     ca_sub = ca_parser.add_subparsers(dest="ca_command")
+    db_parser = subparsers.add_parser("db", help="Database operations")
+    db_sub = db_parser.add_subparsers(dest="db_command")
+    repo_parser = subparsers.add_parser("repo", help="Repository server operations")
+    repo_sub = repo_parser.add_subparsers(dest="repo_command")
 
     # --- db init ---
     p = subparsers.add_parser("db", help="Database operations")
@@ -450,8 +506,8 @@ def main() -> None:
     p.add_argument("--validity-days", type=int, default=3650)
     p.add_argument("--log-file", default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--db-path", default="./pki/micropki.db", help="SQLite DB path (default: ./pki/micropki.db)")
 
-    # --- ca issue-intermediate ---
     p = ca_sub.add_parser("issue-intermediate", help="Create Intermediate CA signed by Root")
     p.set_defaults(_parser=p, _run=cmd_ca_issue_intermediate)
     p.add_argument("--root-cert", required=True, help="Root CA cert PEM")
@@ -466,8 +522,8 @@ def main() -> None:
     p.add_argument("--pathlen", type=int, default=0)
     p.add_argument("--log-file", default=None)
     p.add_argument("--force", action="store_true")
+    p.add_argument("--db-path", default="./pki/micropki.db", help="SQLite DB path (default: ./pki/micropki.db)")
 
-    # --- ca issue-cert ---
     p = ca_sub.add_parser("issue-cert", help="Issue end-entity certificate")
     p.set_defaults(_parser=p, _run=cmd_ca_issue_cert)
     p.add_argument("--ca-cert", required=True, help="Issuing CA cert PEM")
@@ -480,14 +536,26 @@ def main() -> None:
     p.add_argument("--validity-days", type=int, default=365)
     p.add_argument("--csr", default=None, help="External CSR PEM (optional)")
     p.add_argument("--log-file", default=None)
+    p.add_argument("--db-path", default=None, help="SQLite DB path (default: inferred from --out-dir)")
 
-    # --- ca verify ---
     p = ca_sub.add_parser("verify", help="Verify certificate (self-signed)")
     p.set_defaults(_run=cmd_ca_verify)
     p.add_argument("--cert", required=True)
     p.add_argument("--log-file", default=None)
 
-    # --- ca verify-chain ---
+    p = ca_sub.add_parser("list-certs", help="List certificates from database")
+    p.set_defaults(_run=cmd_ca_list_certs)
+    p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--status", choices=["valid", "revoked", "expired"], default=None)
+    p.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    p.add_argument("--log-file", default=None)
+
+    p = ca_sub.add_parser("show-cert", help="Show certificate PEM by serial")
+    p.set_defaults(_run=cmd_ca_show_cert)
+    p.add_argument("serial")
+    p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--log-file", default=None)
+
     p = ca_sub.add_parser("verify-chain", help="Validate full certificate chain")
     p.set_defaults(_run=cmd_ca_verify_chain)
     p.add_argument("--leaf", required=True, help="Leaf certificate PEM")
@@ -532,6 +600,24 @@ def main() -> None:
     if args.command == "ca":
         if not getattr(args, "ca_command", None):
             ca_parser.print_help()
+            sys.exit(0)
+        if getattr(args, "db_path", None) is None and getattr(args, "out_dir", None):
+            args.db_path = _default_db_path_for_out_dir(args.out_dir)
+        run = getattr(args, "_run", None)
+        if run:
+            sys.exit(run(args))
+
+    if args.command == "db":
+        if not getattr(args, "db_command", None):
+            db_parser.print_help()
+            sys.exit(0)
+        run = getattr(args, "_run", None)
+        if run:
+            sys.exit(run(args))
+
+    if args.command == "repo":
+        if not getattr(args, "repo_command", None):
+            repo_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:

@@ -19,8 +19,7 @@ class _UtcFormatter(logging.Formatter):
 
 _FMT = "%(asctime)s %(levelname)s %(message)s"
 
-# Track current config to avoid redundant handler swaps
-_current_log_file: str | None = object()  # sentinel: never matches any real value
+_current_log_file: str | None = object()
 
 
 def setup_logging(log_file: str | None = None) -> logging.Logger:

@@ -63,7 +63,7 @@ def test_cli_ca_init_invalid_dn():
     try:
         code, _, err = _run_micropki(
             "ca", "init",
-            "--subject", "CN=,O=Bad",  # empty value
+            "--subject", "CN=,O=Bad",
             "--key-type", "rsa", "--key-size", "4096",
             "--passphrase-file", pass_path,
         )
@@ -155,7 +155,6 @@ def test_cli_ca_init_log_file(tmp_path):
     assert "Saved private key" in log_text
     assert "Saved certificate" in log_text
     assert "policy" in log_text.lower()
-    # Passphrase must NOT appear in logs (LOG-3)
     assert "secret" not in log_text
 
 

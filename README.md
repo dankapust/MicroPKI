@@ -271,6 +271,8 @@ micropki/
   templates.py      # Certificate templates (server, client, code_signing), SAN parsing
   chain.py          # Chain validation: signatures, validity, constraints
   crypto_utils.py   # PEM, key generation, encryption, passphrase loading
+  database.py       # SQLite schema, certificates + crl_metadata
+  repository.py     # HTTP repository (certificates, CA PEMs, CRL)
   logger.py         # logging setup (file/stderr, ISO 8601)
 tests/              # pytest
 scripts/            # verify_key_cert_match.py

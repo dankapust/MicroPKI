@@ -7,9 +7,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cryptography import x509
 from cryptography.x509.oid import NameOID
 
 from . import certificates
+from . import database
 from . import crypto_utils
 from . import csr as csr_module
 from . import logger as log_module
@@ -18,9 +20,28 @@ from . import serial
 from . import templates as tmpl
 
 
-# ---------------------------------------------------------------------------
-# Key generation helper (deduplicates rsa/ecc branching)
-# ---------------------------------------------------------------------------
+def resolve_local_ca_for_issuer(
+    out_dir: str,
+    issuer_rfc4514: str,
+) -> tuple[x509.Certificate, Path, str] | None:
+    """
+    Map stored issuer DN to local Root/Intermediate CA cert path, key path, and default CRL filename.
+    Returns (Certificate, key_path, default_crl.pem name) or None if no match.
+    """
+    out = Path(out_dir)
+    root_cert_p = out / "certs" / "ca.cert.pem"
+    if not root_cert_p.is_file():
+        return None
+    root_c = crypto_utils.load_certificate_pem(str(root_cert_p))
+    inter_cert_p = out / "certs" / "intermediate.cert.pem"
+    if inter_cert_p.is_file():
+        inter_c = crypto_utils.load_certificate_pem(str(inter_cert_p))
+        if inter_c.subject.rfc4514_string() == issuer_rfc4514:
+            return inter_c, out / "private" / "intermediate.key.pem", "intermediate.crl.pem"
+    if root_c.subject.rfc4514_string() == issuer_rfc4514:
+        return root_c, out / "private" / "ca.key.pem", "root.crl.pem"
+    return None
+
 
 def _gen_key(key_type: str, key_size: int, logger, label: str = ""):
     logger.info("Starting key generation%s (type=%s, size=%s)",
@@ -30,18 +51,15 @@ def _gen_key(key_type: str, key_size: int, logger, label: str = ""):
     return key
 
 
-# ---------------------------------------------------------------------------
-# Sprint 1: Root CA
-# ---------------------------------------------------------------------------
-
 def init_root_ca(
     subject: str, key_type: str, key_size: int,
     passphrase: bytes, out_dir: str, validity_days: int,
-    log_file: str | None = None, force: bool = False,
+    db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     """Create self-signed Root CA: key, cert, policy.txt."""
     logger = log_module.setup_logging(log_file)
     out = Path(out_dir)
+    (out / "crl").mkdir(parents=True, exist_ok=True)
     key_path = out / "private" / "ca.key.pem"
     cert_path = out / "certs" / "ca.cert.pem"
     policy_path = out / "policy.txt"
@@ -51,9 +69,11 @@ def init_root_ca(
     key = _gen_key(key_type, key_size, logger)
 
     logger.info("Starting certificate signing")
+    db_path = db_path or str(out / "micropki.db")
     cert = certificates.build_self_signed_root_ca(
         subject_dn=subject, private_key=key,
         validity_days=validity_days, key_type=key_type, key_size=key_size,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     logger.info("Certificate signing completed successfully")
 
@@ -83,19 +103,16 @@ def init_root_ca(
     logger.info("Generated policy document at %s", str(policy_path.resolve()))
 
 
-# ---------------------------------------------------------------------------
-# Sprint 2: Intermediate CA
-# ---------------------------------------------------------------------------
-
 def issue_intermediate_ca(
     root_cert_path: str, root_key_path: str, root_passphrase: bytes,
     subject: str, key_type: str, key_size: int,
     passphrase: bytes, out_dir: str, validity_days: int,
-    pathlen: int = 0, log_file: str | None = None, force: bool = False,
+    pathlen: int = 0, db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     """Generate Intermediate CA: key, CSR, Root signs it, save, update policy."""
     logger = log_module.setup_logging(log_file)
     out = Path(out_dir)
+    (out / "crl").mkdir(parents=True, exist_ok=True)
     key_path = out / "private" / "intermediate.key.pem"
     cert_path = out / "certs" / "intermediate.cert.pem"
     policy_path = out / "policy.txt"
@@ -111,11 +128,18 @@ def issue_intermediate_ca(
     inter_csr = csr_module.generate_intermediate_csr(subject, inter_key, pathlen)
     logger.info("Intermediate CA CSR generated")
 
+    db_path = db_path or str(out / "micropki.db")
+    database.init_db(db_path)
+
     logger.info("Signing Intermediate CA certificate with Root CA")
     inter_cert = csr_module.sign_intermediate_csr(
         inter_csr, root_cert, root_key, validity_days, pathlen,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     logger.info("Intermediate CA certificate signed (serial=%x)", inter_cert.serial_number)
+
+    _insert_cert_record(db_path, inter_cert)
+    logger.info("Certificate insertion successful: serial=%x, subject=%s", inter_cert.serial_number, subject)
 
     _save_ca_artifacts(out, key_path, cert_path, inter_key, passphrase, inter_cert, logger)
 
@@ -144,15 +168,11 @@ def issue_intermediate_ca(
     logger.info("Updated policy document at %s", str(policy_path.resolve()))
 
 
-# ---------------------------------------------------------------------------
-# Sprint 2: End-entity certificates
-# ---------------------------------------------------------------------------
-
 def issue_end_entity(
     ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes,
     template: str, subject: str, san_strings: list[str],
     out_dir: str, validity_days: int,
-    csr_path: str | None = None, log_file: str | None = None,
+    csr_path: str | None = None, db_path: str | None = None, log_file: str | None = None,
 ) -> None:
     """Issue end-entity certificate using a template. Optionally sign external CSR."""
     logger = log_module.setup_logging(log_file)
@@ -165,6 +185,10 @@ def issue_end_entity(
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    pki_root = out.parent if out.name == "certs" else out
+    (pki_root / "crl").mkdir(parents=True, exist_ok=True)
+    db_path = db_path or str(pki_root / "micropki.db")
+    database.init_db(db_path)
     base_name = _safe_filename(_extract_cn(subject))
 
     if csr_path:
@@ -187,6 +211,7 @@ def issue_end_entity(
         subject_dn=subject, public_key=public_key,
         ca_cert=ca_cert, ca_key=ca_key,
         validity_days=validity_days, template_ext=ext,
+        serial_number=serial_module.generate_unique_serial(db_path),
     )
     san_desc = ", ".join(san_strings) if san_strings else "none"
     logger.info(
@@ -194,6 +219,9 @@ def issue_end_entity(
         cert.serial_number, subject, template, san_desc,
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+
+    _insert_cert_record(db_path, cert)
+    logger.info("Certificate insertion successful: serial=%x, subject=%s", cert.serial_number, subject)
 
     cert_file = out / f"{base_name}.cert.pem"
     cert_file.write_bytes(crypto_utils.cert_to_pem(cert))
@@ -244,10 +272,6 @@ def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:
     logger.info("Certificate verification succeeded: %s", cert_path)
     return True
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _check_overwrite(paths: list[Path], force: bool, logger) -> None:
     if force:
@@ -313,3 +337,16 @@ Issuer (Root CA) DN: {issuer_dn}
 """
     with open(policy_path, "a", encoding="utf-8") as f:
         f.write(section)
+
+
+def _insert_cert_record(db_path: str, cert) -> None:
+    database.insert_certificate(
+        db_path,
+        serial_hex=f"{cert.serial_number:X}",
+        subject=cert.subject.rfc4514_string(),
+        issuer=cert.issuer.rfc4514_string(),
+        not_before=cert.not_valid_before_utc.isoformat().replace("+00:00", "Z"),
+        not_after=cert.not_valid_after_utc.isoformat().replace("+00:00", "Z"),
+        cert_pem=crypto_utils.cert_to_pem(cert).decode("utf-8"),
+        status="valid",
+    )
