@@ -7,12 +7,22 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from . import crypto_utils
+from . import ca as ca_module
 from .database import get_db_connection
 from .logger import setup_logging
 from .repository import get_certificate_by_serial, list_certificates
 app = FastAPI(title="MicroPKI Repository", version="1.0")
 logger = None
+CERT_DIR = Path("./pki/certs")
+CA_CONFIG = {
+    "ca_cert_path": None,
+    "ca_key_path": None,
+    "ca_passphrase": None,
+    "db_path": "./pki/micropki.db",
+    "out_dir": "./pki/certs",
+}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +30,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-def init_server(log_file: str | None = None, cert_dir: str | Path = "./pki/certs"):
+def init_server(
+    log_file: str | None = None,
+    cert_dir: str | Path = "./pki/certs",
+    ca_cert: str | None = None,
+    ca_key: str | None = None,
+    ca_pass_file: str | None = None,
+    db_path: str = "./pki/micropki.db",
+):
     global logger
     logger = setup_logging(log_file)
     global CERT_DIR
@@ -28,6 +45,15 @@ def init_server(log_file: str | None = None, cert_dir: str | Path = "./pki/certs
     if not CERT_DIR.exists():
         logger.error("Certificate directory does not exist: %s", CERT_DIR)
         raise FileNotFoundError(f"Certificate directory not found: {CERT_DIR}")
+    CA_CONFIG["db_path"] = db_path
+    CA_CONFIG["out_dir"] = str(cert_dir)
+    if ca_cert and ca_key and ca_pass_file:
+        CA_CONFIG["ca_cert_path"] = ca_cert
+        CA_CONFIG["ca_key_path"] = ca_key
+        CA_CONFIG["ca_passphrase"] = crypto_utils.load_passphrase(ca_pass_file)
+        logger.info("CA signing enabled for /request-cert endpoint")
+    else:
+        logger.warning("CA signing NOT configured. POST /request-cert will be unavailable.")
     logger.info("Repository server initialised. Serving certificates from %s", CERT_DIR)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -35,8 +61,8 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     duration = (datetime.now() - start_time).total_seconds() * 1000
     if logger:
-        logger.info("[HTTP] %s %s %s %d %dms", 
-                    request.client.host, request.method, request.url.path, 
+        logger.info("[HTTP] %s %s %s %d %dms",
+                    request.client.host, request.method, request.url.path,
                     response.status_code, duration)
     return response
 @app.get("/certificate/{serial_hex}")
@@ -81,12 +107,45 @@ async def get_crl(ca: str = "intermediate"):
         headers = {
             "Content-Type": "application/pkix-crl",
             "Last-Modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT'),
-            "Cache-Control": "max-age=3600"  
+            "Cache-Control": "max-age=3600"
         }
         return PlainTextResponse(content=crl_pem, media_type="application/pkix-crl", headers=headers)
     except Exception as e:
         if logger: logger.error("Error reading CRL file %s: %s", crl_path, e)
         raise HTTPException(status_code=500, detail="Error reading CRL file")
+class CertRequest(BaseModel):
+    csr_pem: str
+    template: str = "server"
+@app.post("/request-cert", status_code=201)
+async def request_cert(req: CertRequest, request: Request):
+    if not CA_CONFIG["ca_cert_path"]:
+        raise HTTPException(status_code=503, detail="CA signing not configured on this server")
+    client_ip = request.client.host if request.client else "unknown"
+    if logger:
+        logger.info("[API] Certificate request from %s, template=%s", client_ip, req.template)
+        logger.warning("[API] No authentication on /request-cert endpoint (demo mode)")
+    try:
+        cert_pem = ca_module.issue_end_entity(
+            ca_cert_path=CA_CONFIG["ca_cert_path"],
+            ca_key_path=CA_CONFIG["ca_key_path"],
+            ca_passphrase=CA_CONFIG["ca_passphrase"],
+            template=req.template,
+            subject="",
+            san_strings=[],
+            out_dir=CA_CONFIG["out_dir"],
+            validity_days=365,
+            csr_pem=req.csr_pem,
+            db_path=CA_CONFIG["db_path"],
+        )
+    except ValueError as e:
+        if logger: logger.error("[API] Certificate request rejected: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        if logger: logger.error("[API] Certificate issuance failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Issuance failed: {e}")
+    if logger:
+        logger.info("[API] Certificate issued successfully for request from %s", client_ip)
+    return PlainTextResponse(content=cert_pem, status_code=201, media_type="application/x-pem-file")
 @app.get("/")
 async def root():
     return {"message": "MicroPKI Repository is running", "status": "ok"}

@@ -273,30 +273,77 @@ pki\certs\example.com.cert.pem: revoked
     Revocation Time: Apr  8 07:47:10 2026 GMT
 ```
 
+## Использование (Спринт 6) — Клиентские инструменты и валидация
+
+### Генерация ключа и CSR
+
+Генерация закрытого ключа (RSA-2048) и запроса на подпись сертификата (PKCS#10):
+
+```powershell
+micropki client gen-csr --subject "/CN=app.example.com" --key-type rsa --key-size 2048 --san dns:app.example.com --san dns:api.example.com --out-key ./app.key.pem --out-csr ./app.csr.pem
+```
+
+### Запрос сертификата через API
+
+Запустите сервер репозитория с поддержкой подписания:
+
+```powershell
+micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass
+```
+
+Отправьте CSR:
+
+```powershell
+micropki client request-cert --csr ./app.csr.pem --template server --ca-url http://127.0.0.1:8080 --out-cert ./app.cert.pem
+```
+
+### Валидация цепочки сертификатов
+
+```powershell
+micropki client validate --cert ./app.cert.pem --untrusted pki\certs\intermediate.cert.pem --trusted pki\certs\ca.cert.pem --mode chain
+```
+
+Полная валидация с проверкой отзыва (OCSP + CRL):
+
+```powershell
+micropki client validate --cert ./app.cert.pem --untrusted pki\certs\intermediate.cert.pem --trusted pki\certs\ca.cert.pem --ocsp --ocsp-url http://127.0.0.1:8081 --mode full
+```
+
+### Проверка статуса отзыва (OCSP -> CRL fallback)
+
+```powershell
+micropki client check-status --cert ./app.cert.pem --ca-cert pki\certs\intermediate.cert.pem --ocsp-url http://127.0.0.1:8081
+```
+
+Логика: OCSP первым, при неудаче — CRL, оба недоступны — статус `unknown`.
+
 ## Структура проекта
 
 ```
 micropki/
   __init__.py
-  __main__.py         # python -m micropki
-  cli.py              # парсер аргументов для всех подкоманд
-  ca.py               # инициализация корневого УЦ, промежуточный УЦ, выпуск сертификатов, проверка
-  certificates.py     # построение X.509, расширения, разбор DN
-  chain.py            # валидация цепочки: подписи, сроки, ограничения
-  crl.py              # инструменты генерации CRL
-  crypto_utils.py     # PEM, генерация ключей, шифрование, загрузка паролей
-  csr.py              # генерация CSR, подписание промежуточным/конечным УЦ
-  database.py         # схема SQLite, таблицы certificates и crl_metadata
-  logger.py           # настройка логирования (файл/stderr, ISO 8601)
-  ocsp.py             # разбор OCSP-запросов и формирование ответов (RFC 6960)
-  ocsp_responder.py   # HTTP-сервер OCSP на базе FastAPI
-  repo.py             # HTTP-сервер для раздачи сертификатов и CRL
-  repository.py       # CRUD-операции с базой данных сертификатов
-  revocation.py       # обработка отзыва сертификатов
-  serial.py           # генерация и форматирование серийных номеров
-  templates.py        # шаблоны сертификатов (server, client, code_signing, ocsp)
-tests/                # pytest
-scripts/              # verify_key_cert_match.py
+  __main__.py          # python -m micropki
+  cli.py               # парсер аргументов (ca, db, repo, ocsp, client)
+  ca.py                # корневой/промежуточный УЦ, выпуск сертификатов
+  certificates.py      # построение X.509, расширения, разбор DN
+  chain.py             # базовая валидация цепочки
+  client.py            # клиент: gen-csr, request-cert, validate, check-status
+  crl.py               # генерация CRL
+  crypto_utils.py      # PEM, ключи, шифрование, загрузка паролей
+  csr.py               # генерация CSR, подписание
+  database.py          # SQLite: certificates, crl_metadata
+  logger.py            # логирование (файл/stderr, ISO 8601)
+  ocsp.py              # OCSP-ответы (RFC 6960)
+  ocsp_responder.py    # HTTP-сервер OCSP (FastAPI)
+  repo.py              # HTTP-репозиторий + POST /request-cert
+  repository.py        # CRUD сертификатов в БД
+  revocation.py        # внутренний отзыв сертификатов
+  revocation_check.py  # клиентская проверка: OCSP, CRL, fallback, AIA/CDP
+  serial.py            # серийные номера
+  templates.py         # шаблоны (server, client, code_signing, ocsp)
+  validation.py        # валидация цепочки по RFC 5280
+tests/                 # pytest
+scripts/               # verify_key_cert_match.py
 requirements.txt
 pyproject.toml
 ```
@@ -304,3 +351,4 @@ pyproject.toml
 ## Лицензия
 
 Для образовательных целей и демонстрации.
+

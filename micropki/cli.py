@@ -382,7 +382,88 @@ def cmd_ca_show_cert(args):
         print(f"Error showing certificate: {e}", file=sys.stderr)
         return 1
 def cmd_repo_serve(args):
-    pass 
+    import uvicorn
+    from .repo import init_server, app
+    init_server(
+        log_file=args.log_file,
+        cert_dir=args.cert_dir,
+        ca_cert=getattr(args, "ca_cert", None),
+        ca_key=getattr(args, "ca_key", None),
+        ca_pass_file=getattr(args, "ca_pass_file", None),
+        db_path=args.db_path,
+    )
+    sys.exit(uvicorn.run(app, host=args.host, port=args.port, log_level="info"))
+def cmd_client_gen_csr(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import client as client_module
+    try:
+        client_module.generate_csr(
+            subject=args.subject,
+            key_type=args.key_type,
+            key_size=args.key_size,
+            san_strings=getattr(args, "san", None),
+            out_key=args.out_key,
+            out_csr=args.out_csr,
+            log_file=args.log_file,
+        )
+        return 0
+    except Exception as e:
+        log.error("gen-csr failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+def cmd_client_request_cert(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import client as client_module
+    try:
+        client_module.request_certificate(
+            csr_path=args.csr,
+            template=args.template,
+            ca_url=args.ca_url,
+            out_cert=args.out_cert,
+            log_file=args.log_file,
+        )
+        return 0
+    except Exception as e:
+        log.error("request-cert failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+def cmd_client_validate(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import client as client_module
+    try:
+        result = client_module.validate_certificate(
+            cert_path=args.cert,
+            untrusted_paths=getattr(args, "untrusted", None),
+            trusted_path=args.trusted,
+            crl_source=getattr(args, "crl", None),
+            use_ocsp=getattr(args, "ocsp", False),
+            ocsp_url=getattr(args, "ocsp_url", None),
+            mode=args.mode,
+            validation_time=getattr(args, "validation_time", None),
+            output_format=getattr(args, "format", "table"),
+            log_file=args.log_file,
+        )
+        return 0 if result.passed else 1
+    except Exception as e:
+        log.error("validate failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+def cmd_client_check_status(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import client as client_module
+    try:
+        result = client_module.check_status(
+            cert_path=args.cert,
+            ca_cert_path=args.ca_cert,
+            crl_source=getattr(args, "crl", None),
+            ocsp_url=getattr(args, "ocsp_url", None),
+            log_file=args.log_file,
+        )
+        return 0 if result.status == "good" else 1
+    except Exception as e:
+        log.error("check-status failed: %s", e)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 def cmd_ca_issue_ocsp_cert(args) -> int:
     log = log_module.setup_logging(getattr(args, "log_file", None))
     _validate_passphrase_file(args._parser, args.ca_pass_file, "--ca-pass-file")
@@ -421,12 +502,17 @@ def main() -> None:
     p_init.set_defaults(_parser=p_init, _run=cmd_db_init)
     p_init.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
     p_init.add_argument("--log-file", default=None)
+    client_parser = subparsers.add_parser("client", help="Client tools")
+    client_sub = client_parser.add_subparsers(dest="client_command")
     p_serve = repo_sub.add_parser("serve", help="Start the repository HTTP server")
     p_serve.set_defaults(_parser=p_serve, _run=cmd_repo_serve)
     p_serve.add_argument("--host", default="127.0.0.1", help="Bind address")
     p_serve.add_argument("--port", type=int, default=8080, help="TCP port")
     p_serve.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
     p_serve.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates")
+    p_serve.add_argument("--ca-cert", default=None, help="CA cert PEM for /request-cert")
+    p_serve.add_argument("--ca-key", default=None, help="CA key PEM for /request-cert")
+    p_serve.add_argument("--ca-pass-file", default=None, help="CA passphrase file for /request-cert")
     p_serve.add_argument("--log-file", default=None)
     p = ca_sub.add_parser("init", help="Create self-signed Root CA")
     p.set_defaults(_parser=p, _run=cmd_ca_init)
@@ -533,6 +619,41 @@ def main() -> None:
     p.add_argument("--ca-cert", required=True, help="Issuer CA cert PEM")
     p.add_argument("--cache-ttl", type=int, default=60, help="Cache TTL (unused)")
     p.add_argument("--log-file", default=None)
+    p = client_sub.add_parser("gen-csr", help="Generate private key and CSR")
+    p.set_defaults(_run=cmd_client_gen_csr)
+    p.add_argument("--subject", required=True, help="Subject DN")
+    p.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa")
+    p.add_argument("--key-size", type=int, default=2048)
+    p.add_argument("--san", action="append", help="SAN (e.g. dns:app.example.com)")
+    p.add_argument("--out-key", default="./key.pem", help="Output key file")
+    p.add_argument("--out-csr", default="./request.csr.pem", help="Output CSR file")
+    p.add_argument("--log-file", default=None)
+    p = client_sub.add_parser("request-cert", help="Submit CSR and receive certificate")
+    p.set_defaults(_run=cmd_client_request_cert)
+    p.add_argument("--csr", required=True, help="Path to CSR PEM file")
+    p.add_argument("--template", required=True, choices=["server", "client", "code_signing"])
+    p.add_argument("--ca-url", required=True, help="Base URL of the repository")
+    p.add_argument("--out-cert", default="./cert.pem", help="Output certificate file")
+    p.add_argument("--log-file", default=None)
+    p = client_sub.add_parser("validate", help="Validate certificate chain")
+    p.set_defaults(_run=cmd_client_validate)
+    p.add_argument("--cert", required=True, help="Leaf certificate PEM")
+    p.add_argument("--untrusted", action="append", help="Intermediate cert(s) PEM")
+    p.add_argument("--trusted", default="./pki/certs/ca.cert.pem", help="Trusted root cert PEM")
+    p.add_argument("--crl", default=None, help="CRL file or URL")
+    p.add_argument("--ocsp", action="store_true", help="Enable OCSP checking")
+    p.add_argument("--ocsp-url", default=None, help="Override OCSP responder URL")
+    p.add_argument("--mode", choices=["chain", "full"], default="full")
+    p.add_argument("--validation-time", default=None, help="Override validation time (ISO 8601)")
+    p.add_argument("--format", choices=["table", "json"], default="table")
+    p.add_argument("--log-file", default=None)
+    p = client_sub.add_parser("check-status", help="Check revocation status (OCSP/CRL)")
+    p.set_defaults(_run=cmd_client_check_status)
+    p.add_argument("--cert", required=True, help="Certificate PEM")
+    p.add_argument("--ca-cert", required=True, help="Issuer CA certificate PEM")
+    p.add_argument("--crl", default=None, help="CRL file or URL")
+    p.add_argument("--ocsp-url", default=None, help="Override OCSP responder URL")
+    p.add_argument("--log-file", default=None)
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -546,44 +667,34 @@ def main() -> None:
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
-    if args.command == "db":
+    elif args.command == "db":
         if not getattr(args, "db_command", None):
             db_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
-    if args.command == "repo":
+    elif args.command == "repo":
         if not getattr(args, "repo_command", None):
             repo_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
-    if args.command == "ocsp":
+    elif args.command == "ocsp":
         if not getattr(args, "ocsp_command", None):
             ocsp_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
-    elif args.command == "db":
-        if not getattr(args, "db_command", None):
-            parser.print_help()
+    elif args.command == "client":
+        if not getattr(args, "client_command", None):
+            client_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:
             sys.exit(run(args))
-    elif args.command == "repo":
-        if not getattr(args, "repo_command", None):
-            parser.print_help()
-            sys.exit(0)
-        run = getattr(args, "_run", None)
-        if run:
-            import uvicorn
-            from .repo import init_server, app
-            init_server(log_file=args.log_file, cert_dir=args.cert_dir)
-            sys.exit(uvicorn.run(app, host=args.host, port=args.port, log_level="info"))
     sys.exit(0)
 if __name__ == "__main__":
     main()

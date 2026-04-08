@@ -133,32 +133,80 @@ def issue_end_entity(
     ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes,
     template: str, subject: str, san_strings: list[str],
     out_dir: str, validity_days: int,
-    csr_path: str | None = None, db_path: str | None = None, log_file: str | None = None,
-) -> None:
+    csr_path: str | None = None, csr_pem: str | None = None,
+    db_path: str | None = None, log_file: str | None = None,
+) -> str | None:
     logger = log_module.setup_logging(log_file)
     ca_cert = crypto_utils.load_certificate_pem(ca_cert_path)
     ca_key = crypto_utils.load_private_key_encrypted(ca_key_path, ca_passphrase)
-    san_names = tmpl.parse_san_list(san_strings) if san_strings else []
-    tmpl.validate_san_for_template(template, san_names)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     pki_root = out.parent if out.name == "certs" else out
     (pki_root / "crl").mkdir(parents=True, exist_ok=True)
     db_path = db_path or str(pki_root / "micropki.db")
     database.init_database(db_path)
-    base_name = _safe_filename(_extract_cn(subject))
-    if csr_path:
+    ext_csr = None
+    if csr_pem:
+        ext_csr = x509.load_pem_x509_csr(csr_pem.encode("utf-8") if isinstance(csr_pem, str) else csr_pem)
+    elif csr_path:
         ext_csr = crypto_utils.load_csr_pem(csr_path)
+    if ext_csr is not None:
         if not ext_csr.is_signature_valid:
             raise ValueError("CSR signature verification failed")
+        pub = ext_csr.public_key()
+        from cryptography.hazmat.primitives.asymmetric import rsa as rsa_mod, ec as ec_mod
+        if isinstance(pub, rsa_mod.RSAPublicKey) and pub.key_size < 2048:
+            raise ValueError(f"CSR key too small: {pub.key_size} bits (minimum 2048)")
+        try:
+            bc_req = ext_csr.extensions.get_extension_for_class(x509.BasicConstraints)
+            if bc_req.value.ca:
+                raise ValueError("CSR requests CA=true, rejected for end-entity issuance")
+        except x509.ExtensionNotFound:
+            pass
+        _OID_TO_SHORT = {
+            NameOID.COMMON_NAME: "CN",
+            NameOID.ORGANIZATION_NAME: "O",
+            NameOID.ORGANIZATIONAL_UNIT_NAME: "OU",
+            NameOID.COUNTRY_NAME: "C",
+            NameOID.LOCALITY_NAME: "L",
+            NameOID.STATE_OR_PROVINCE_NAME: "ST",
+            NameOID.STREET_ADDRESS: "STREET",
+            NameOID.DOMAIN_COMPONENT: "DC",
+            NameOID.EMAIL_ADDRESS: "EMAIL",
+        }
+        dn_parts = []
+        for attr in ext_csr.subject:
+            short = _OID_TO_SHORT.get(attr.oid, attr.oid.dotted_string)
+            dn_parts.append(f"{short}={attr.value}")
+        subject = "/" + "/".join(dn_parts)
+        try:
+            san_ext = ext_csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            san_names = list(san_ext.value)
+        except x509.ExtensionNotFound:
+            san_names = []
+        if not san_strings:
+            san_strings = []
+            for name in san_names:
+                if isinstance(name, x509.DNSName):
+                    san_strings.append(f"dns:{name.value}")
+                elif isinstance(name, x509.IPAddress):
+                    san_strings.append(f"ip:{str(name.value)}")
+                elif isinstance(name, x509.RFC822Name):
+                    san_strings.append(f"email:{name.value}")
+                elif isinstance(name, x509.UniformResourceIdentifier):
+                    san_strings.append(f"uri:{name.value}")
         public_key = ext_csr.public_key()
         leaf_key = None
+        logger.info("Using public key from CSR")
     else:
         logger.info("Generating key pair for end-entity certificate")
         is_rsa_ca = crypto_utils.is_rsa_key(ca_key)
         leaf_key = crypto_utils.generate_key("rsa", 2048) if is_rsa_ca else crypto_utils.generate_key("ecc", 256)
         public_key = leaf_key.public_key()
         logger.info("Key pair generated for %s", subject)
+    san_names = tmpl.parse_san_list(san_strings) if san_strings else []
+    tmpl.validate_san_for_template(template, san_names)
+    base_name = _safe_filename(_extract_cn(subject))
     ext = tmpl.get_template_extensions(template, san_names, is_rsa=crypto_utils.is_rsa_key(public_key))
     logger.info("Issuing %s certificate for %s", template, subject)
     cert = csr_module.issue_end_entity_cert(
@@ -175,13 +223,14 @@ def issue_end_entity(
     )
     _insert_cert_record(db_path, cert)
     logger.info("Certificate insertion successful: serial=%x, subject=%s", cert.serial_number, subject)
+    cert_pem_bytes = crypto_utils.cert_to_pem(cert)
     cert_file = out / f"{base_name}.cert.pem"
-    cert_file.write_bytes(crypto_utils.cert_to_pem(cert))
+    cert_file.write_bytes(cert_pem_bytes)
     logger.info("Saved certificate to %s", str(cert_file.resolve()))
-
     if leaf_key is not None:
         key_file = out / f"{base_name}.key.pem"
         crypto_utils.write_private_key_unencrypted(str(key_file), leaf_key, logger=logger)
+    return cert_pem_bytes.decode("utf-8")
 def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:
     logger = log_module.setup_logging(log_file)
     cert = crypto_utils.load_certificate_pem(cert_path)
