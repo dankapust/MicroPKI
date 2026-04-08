@@ -1,17 +1,11 @@
-"""Functions to interact with the certificate database for CRUD operations."""
-
 from __future__ import annotations
-
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-
 from . import serial
 from .database import get_db_connection
 from .logger import setup_logging
-
-
 def insert_certificate(
     serial_number: int,
     subject: str,
@@ -24,7 +18,6 @@ def insert_certificate(
     db_path: str | Path = "./pki/micropki.db",
     log_file: str | None = None,
 ) -> None:
-    """Insert a new certificate record into the database. Converts serial to hex."""
     logger = setup_logging(log_file)
     created_at = created_at or datetime.now().isoformat()
     serial_hex = serial.serial_to_hex(serial_number)
@@ -51,13 +44,10 @@ def insert_certificate(
     finally:
         if conn:
             conn.close()
-
-
 def get_certificate_by_serial(
     serial_number: int, 
     db_path: str | Path = "./pki/micropki.db"
 ) -> dict | None:
-    """Retrieve a certificate record by its serial number (integer)."""
     serial_hex = serial.serial_to_hex(serial_number)
     conn = None
     try:
@@ -72,13 +62,10 @@ def get_certificate_by_serial(
     finally:
         if conn:
             conn.close()
-
-
 def list_certificates(
     status: str | None = None,
     db_path: str | Path = "./pki/micropki.db"
 ) -> list[dict]:
-    """List all certificates, optionally filtered by status."""
     conn = None
     try:
         conn = get_db_connection(db_path)
@@ -96,13 +83,10 @@ def list_certificates(
     finally:
         if conn:
             conn.close()
-
-
 def update_certificate_status(serial_number: int, new_status: str,
     revocation_reason: str | None = None,
     revocation_date: str | None = None,
     db_path: str | Path = "./pki/micropki.db") -> None:
-    """Update the status of a certificate (e.g., revoke it)."""
     serial_hex = serial.serial_to_hex(serial_number)
     conn = None
     try:

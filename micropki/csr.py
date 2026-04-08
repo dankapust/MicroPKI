@@ -1,41 +1,28 @@
-"""CSR generation and certificate issuance (Intermediate CA and end-entity)."""
-
 from __future__ import annotations
-
 from datetime import datetime, timedelta, timezone
-
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-
 from .certificates import parse_subject_dn, subject_key_identifier_from_public_key
 from .crypto_utils import make_serial, signing_algorithm
 from .templates import TemplateExtensions
-
-
 def generate_intermediate_csr(
     subject_dn: str,
     private_key: rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey,
     path_length: int = 0,
 ) -> x509.CertificateSigningRequest:
-    """Generate PKCS#10 CSR for Intermediate CA (PKI-6)."""
     builder = (
         x509.CertificateSigningRequestBuilder()
         .subject_name(parse_subject_dn(subject_dn))
         .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
     )
     return builder.sign(private_key, signing_algorithm(private_key))
-
-
 def _build_aki_from_issuer(issuer_cert: x509.Certificate) -> x509.AuthorityKeyIdentifier:
-    """AKI from issuer's SKI."""
     ski_ext = issuer_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
     return x509.AuthorityKeyIdentifier(
         key_identifier=ski_ext.value.digest,
         authority_cert_issuer=None,
         authority_cert_serial_number=None,
     )
-
-
 def sign_intermediate_csr(
     csr: x509.CertificateSigningRequest,
     root_cert: x509.Certificate,
@@ -44,10 +31,6 @@ def sign_intermediate_csr(
     path_length: int = 0,
     serial_number: int | None = None,
 ) -> x509.Certificate:
-    """
-    Root CA signs Intermediate CSR → X.509v3 certificate (PKI-7).
-    Issuer = Root subject. BC CA=TRUE. KU keyCertSign+cRLSign. SKI/AKI.
-    """
     not_before = datetime.now(timezone.utc)
     builder = (
         x509.CertificateBuilder()
@@ -71,8 +54,6 @@ def sign_intermediate_csr(
         .add_extension(_build_aki_from_issuer(root_cert), critical=False)
     )
     return builder.sign(root_key, signing_algorithm(root_key))
-
-
 def issue_end_entity_cert(
     subject_dn: str,
     public_key,
@@ -82,7 +63,6 @@ def issue_end_entity_cert(
     template_ext: TemplateExtensions,
     serial_number: int | None = None,
 ) -> x509.Certificate:
-    """Issue end-entity certificate signed by CA (PKI-8). Extensions from template."""
     not_before = datetime.now(timezone.utc)
     builder = (
         x509.CertificateBuilder()

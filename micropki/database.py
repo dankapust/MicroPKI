@@ -1,29 +1,18 @@
-"""Database connection and initialization for certificate storage."""
-
 from __future__ import annotations
-
 import sqlite3
 from pathlib import Path
-
 from .logger import setup_logging
-
-
 def get_db_connection(db_path: str | Path) -> sqlite3.Connection:
-    """Get a connection to the SQLite database."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row  # Enable dict-like access to rows
+    conn.row_factory = sqlite3.Row  
     return conn
-
-
 def init_database(db_path: str | Path, log_file: str | None = None) -> None:
-    """Initialise the SQLite database with the certificates table."""
     logger = setup_logging(log_file)
     conn = None
     try:
         conn = get_db_connection(db_path)
-        # Using TEXT for serial_number to handle large X.509 serials (up to 160 bits)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS certificates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +30,6 @@ def init_database(db_path: str | Path, log_file: str | None = None) -> None:
         ''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_serial ON certificates(serial_number)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_status ON certificates(status)')
-
         conn.execute('''
             CREATE TABLE IF NOT EXISTS crl_metadata (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +41,6 @@ def init_database(db_path: str | Path, log_file: str | None = None) -> None:
             )
         ''')
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_ca_subject ON crl_metadata(ca_subject)')
-
         conn.commit()
         logger.info("Database initialised successfully at %s", db_path)
     except sqlite3.Error as e:
@@ -62,10 +49,7 @@ def init_database(db_path: str | Path, log_file: str | None = None) -> None:
     finally:
         if conn:
             conn.close()
-
-
 def set_certificate_revoked(db_path: str | Path, serial_number_hex: str, reason: str, revocation_date: str) -> bool:
-    """Mark a certificate as revoked. Expects serial_number_hex as hex string."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.cursor()
@@ -75,7 +59,6 @@ def set_certificate_revoked(db_path: str | Path, serial_number_hex: str, reason:
             return False
         if row["status"] == "revoked":
             return False
-
         cur.execute('''
             UPDATE certificates
             SET status = 'revoked', revocation_reason = ?, revocation_date = ?
@@ -85,10 +68,7 @@ def set_certificate_revoked(db_path: str | Path, serial_number_hex: str, reason:
         return True
     finally:
         conn.close()
-
-
 def get_revoked_certificates_by_issuer(db_path: str | Path, issuer: str) -> list[dict]:
-    """Get all revoked certificates issued by a specific issuer."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.cursor()
@@ -100,10 +80,7 @@ def get_revoked_certificates_by_issuer(db_path: str | Path, issuer: str) -> list
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
-
-
 def get_crl_metadata(db_path: str | Path, ca_subject: str) -> dict | None:
-    """Get the current CRL metadata for a CA."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.cursor()
@@ -116,11 +93,8 @@ def get_crl_metadata(db_path: str | Path, ca_subject: str) -> dict | None:
         return dict(row) if row else None
     finally:
         conn.close()
-
-
 def update_crl_metadata(db_path: str | Path, ca_subject: str, crl_number: int, 
                         last_generated: str, next_update: str, crl_path: str) -> None:
-    """Upsert CRL metadata for a CA."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.cursor()

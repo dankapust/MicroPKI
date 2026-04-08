@@ -1,15 +1,9 @@
-"""X.509 certificate building: self-signed Root CA, extensions (BC, KU, SKI, AKI)."""
-
 from __future__ import annotations
-
 from datetime import datetime, timedelta, timezone
-
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
-
 from .crypto_utils import make_serial, signing_algorithm
-
 _DN_OID_MAP = {
     "C": NameOID.COUNTRY_NAME,
     "O": NameOID.ORGANIZATION_NAME,
@@ -21,22 +15,14 @@ _DN_OID_MAP = {
     "DC": NameOID.DOMAIN_COMPONENT,
     "EMAIL": NameOID.EMAIL_ADDRESS,
 }
-
-
 def parse_subject_dn(dn_string: str) -> x509.Name:
-    """
-    Parse DN from slash or comma notation into x509.Name.
-    E.g. /CN=My Root CA or CN=My Root CA,O=Demo,C=US.
-    """
     s = (dn_string or "").strip()
     if not s:
         raise ValueError("Subject DN is empty")
-
     normalized = s.replace("/", ",").strip(",")
     parts = [p.strip() for p in normalized.split(",") if p.strip()]
     if not parts:
         raise ValueError("Subject DN has no components")
-
     attrs = []
     for part in parts:
         if "=" not in part:
@@ -45,20 +31,13 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
         key, value = key.strip().upper(), value.strip()
         if not key or not value:
             raise ValueError(f"Invalid DN component: {part}")
-
         oid = _DN_OID_MAP.get(key)
         if oid is None:
             raise ValueError(f"Unsupported DN attribute: {key}")
         attrs.append(x509.NameAttribute(oid, value))
-
     return x509.Name(attrs)
-
-
 def subject_key_identifier_from_public_key(public_key) -> x509.SubjectKeyIdentifier:
-    """SKI per RFC 5280 s4.2.1.2: SHA-1 of subjectPublicKey BIT STRING value."""
     return x509.SubjectKeyIdentifier.from_public_key(public_key)
-
-
 def build_self_signed_root_ca(
     subject_dn: str,
     private_key: rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey,
@@ -67,24 +46,16 @@ def build_self_signed_root_ca(
     key_size: int,
     serial_number: int | None = None,
 ) -> x509.Certificate:
-    """
-    Build X.509 v3 self-signed Root CA certificate.
-    Serial from CSPRNG. Subject = Issuer. BC CA=TRUE, KU keyCertSign+cRLSign.
-    SKI/AKI. RSA → SHA-256, ECC P-384 → SHA-384.
-    """
     name = parse_subject_dn(subject_dn)
     public_key = private_key.public_key()
-
     not_before = datetime.now(timezone.utc)
     not_after = not_before + timedelta(days=validity_days)
-
     ski = subject_key_identifier_from_public_key(public_key)
     aki = x509.AuthorityKeyIdentifier(
         key_identifier=ski.digest,
         authority_cert_issuer=None,
         authority_cert_serial_number=None,
     )
-
     builder = (
         x509.CertificateBuilder()
         .subject_name(name)
@@ -106,5 +77,4 @@ def build_self_signed_root_ca(
         .add_extension(ski, critical=False)
         .add_extension(aki, critical=False)
     )
-
     return builder.sign(private_key=private_key, algorithm=signing_algorithm(private_key))

@@ -1,124 +1,102 @@
 # MicroPKI
 
-A minimal, single-handed PKI implementation for learning and demonstration. Establishes a self-signed Root CA with secure key storage and basic audit logging.
+Минимальная реализация инфраструктуры открытых ключей (PKI) для обучения и демонстрации. Поддерживает корневой УЦ, промежуточный УЦ, сертификаты конечных сущностей, отзыв (CRL), сервер репозитория и OCSP-ответчик.
 
-## Dependencies
+## Зависимости
 
-- **Python** 3.8 or higher
-- **cryptography** ≥ 3.0 (see `requirements.txt`)
+- **Python** 3.8 и выше
+- **cryptography** ≥ 3.0
+- **fastapi** и **uvicorn** (для серверов репозитория и OCSP)
 
-## Build / Setup
+Полный список зависимостей — в `requirements.txt`.
+
+## Сборка / Установка
 
 ```bash
-# Clone the repository (if from remote)
-# git clone <repo-url>
-# cd MicroPKI
-
-# Create virtual environment (recommended)
+# Создать виртуальное окружение (рекомендуется)
 python -m venv venv
 # Windows:
 venv\Scripts\activate
 # Unix/macOS:
 # source venv/bin/activate
-# If PowerShell blocks Activate.ps1 (execution policy), use:
-#   venv\Scripts\activate.bat   (from cmd), or
-#   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-# Install dependencies
+# Установить зависимости
 pip install -r requirements.txt
 
-# Install the package in editable mode so `micropki` is available
+# Установить пакет в режиме разработки
 pip install -e .
 ```
 
-## Running tests
+## Запуск тестов
 
 ```bash
 pytest tests/ -v
-# or
-make test
 ```
 
-If you use only `pip install -r requirements.txt` without `pip install -e .`, run the CLI as:
+Если вы установили только зависимости без `pip install -e .`, запускайте CLI так:
 
 ```bash
 python -m micropki ca init ...
 ```
 
-## Quick verification (Windows, полная проверка работы)
+## Быстрый старт (Windows PowerShell)
 
-Выполняйте команды по порядку из каталога проекта `C:\Users\KapDon\.cursor\Kripta`:
+Все команды выполняются из корневой папки проекта.
 
-```powershell
-cd C:\Users\KapDon\.cursor\Kripta
-```
-
-**1. Установка зависимостей и пакета (если ещё не сделано):**
+**1. Установка зависимостей (если ещё не сделано):**
 
 ```powershell
 pip install -r requirements.txt
 pip install -e .
 ```
 
-**2. Создать каталог и файл с паролем:**
+**2. Создание файлов с паролями:**
 
 ```powershell
 mkdir secrets -Force
-Set-Content -Path C:\Users\KapDon\.cursor\Kripta\secrets\ca.pass -Value "your-secret-passphrase" -NoNewline
-```
-
-**3. Инициализировать Root CA:**
-
-```powershell
-micropki ca init --subject "/CN=Demo Root CA" --key-type rsa --key-size 4096 --passphrase-file C:\Users\KapDon\.cursor\Kripta\secrets\ca.pass --out-dir C:\Users\KapDon\.cursor\Kripta\pki
-```
-
-**4. Проверить сертификат:**
-
-```powershell
-micropki ca verify --cert C:\Users\KapDon\.cursor\Kripta\pki\certs\ca.cert.pem
-```
-
-Ожидаемый вывод: `Certificate verification succeeded: ...` и код выхода 0.
-
-**5. (Опционально) Проверить, что ключ соответствует сертификату:**
-
-```powershell
-python C:\Users\KapDon\.cursor\Kripta\scripts\verify_key_cert_match.py C:\Users\KapDon\.cursor\Kripta\pki\private\ca.key.pem C:\Users\KapDon\.cursor\Kripta\pki\certs\ca.cert.pem C:\Users\KapDon\.cursor\Kripta\secrets\ca.pass
-```
-
-Ожидаемый вывод: `OK: Private key matches certificate public key (sign/verify succeeded).`
-
-**6. Запустить тесты:**
-
-```powershell
-cd C:\Users\KapDon\.cursor\Kripta
-pytest tests/ -v
-```
-
----
-
-Если вы уже в каталоге `C:\Users\KapDon\.cursor\Kripta`, можно использовать относительные пути:
-
-```powershell
 Set-Content -Path secrets\ca.pass -Value "your-secret-passphrase" -NoNewline
+Set-Content -Path secrets\inter.pass -Value "intermediate-passphrase" -NoNewline
+```
+
+**3. Инициализация корневого УЦ:**
+
+```powershell
 micropki ca init --subject "/CN=Demo Root CA" --key-type rsa --key-size 4096 --passphrase-file secrets\ca.pass --out-dir .\pki
-micropki ca verify --cert pki\certs\ca.cert.pem
-python scripts\verify_key_cert_match.py pki\private\ca.key.pem pki\certs\ca.cert.pem secrets\ca.pass
-pytest tests/ -v
 ```
 
-## Usage (Sprint 1)
+**4. Проверка сертификата корневого УЦ:**
 
-### Create passphrase file first
+```powershell
+micropki ca verify --cert pki\certs\ca.cert.pem
+```
 
-**Windows (PowerShell):** Use `utf8` (not `utf8NoBOM` on older PowerShell):
+**5. Создание промежуточного УЦ:**
+
+```powershell
+micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "CN=MicroPKI Intermediate CA,O=MicroPKI" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
+```
+
+**6. Выпуск серверного сертификата:**
+
+```powershell
+micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template server --subject "/CN=example.com" --san dns:example.com --out-dir pki\certs
+```
+
+**7. Проверка цепочки доверия:**
+
+```powershell
+micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pki\certs\intermediate.cert.pem --root pki\certs\ca.cert.pem
+```
+
+## Использование (Спринт 1) — Корневой УЦ
+
+### Создание файла с паролем
+
+**Windows (PowerShell):**
 
 ```powershell
 mkdir secrets -Force
 Set-Content -Path secrets\ca.pass -Value "your-secret-passphrase" -NoNewline
-# or (adds newline; micropki strips it):
-"your-secret-passphrase" | Out-File -Encoding utf8 secrets\ca.pass
 ```
 
 **Linux/macOS:**
@@ -128,158 +106,201 @@ mkdir -p secrets
 printf '%s' 'your-secret-passphrase' > secrets/ca.pass
 ```
 
-### Initialize Root CA (RSA 4096)
+### Инициализация корневого УЦ (RSA 4096)
 
-```bash
-# CMD (Windows)
-micropki ca init ^
-    --subject "/CN=Demo Root CA" ^
-    --key-type rsa ^
-    --key-size 4096 ^
-    --passphrase-file secrets\ca.pass ^
-    --out-dir .\pki
-
-# PowerShell
+```powershell
 micropki ca init --subject "/CN=Demo Root CA" --key-type rsa --key-size 4096 --passphrase-file secrets\ca.pass --out-dir .\pki
 ```
 
-### Initialize Root CA (ECC P-384)
+### Инициализация корневого УЦ (ECC P-384)
 
 ```bash
-micropki ca init ^
-    --subject "CN=ECC Root CA,O=MicroPKI" ^
-    --key-type ecc ^
-    --key-size 384 ^
-    --passphrase-file secrets/ca.pass ^
-    --out-dir ./pki
+micropki ca init --subject "CN=ECC Root CA,O=MicroPKI" --key-type ecc --key-size 384 --passphrase-file secrets/ca.pass --out-dir ./pki
 ```
 
-### Verify Root CA certificate
+### Проверка сертификата корневого УЦ
 
-```bash
-micropki ca verify --cert pki/certs/ca.cert.pem
-# Windows:
+```powershell
 micropki ca verify --cert pki\certs\ca.cert.pem
 ```
 
-Or with OpenSSL:
+Проверка через OpenSSL:
 
 ```bash
 openssl x509 -in pki/certs/ca.cert.pem -text -noout
 openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/ca.cert.pem
 ```
 
-## Usage (Sprint 3)
+## Использование (Спринт 2) — Промежуточный УЦ и сертификаты конечных сущностей
 
-### Initialize the certificate database
-
-```bash
-micropki db init --db-path ./pki/micropki.db
-```
-
-### Start the repository HTTP server
-
-```bash
-micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs
-```
-
-### Example API requests (curl)
-
-# Retrieve a certificate by serial
-$ curl http://localhost:8080/certificate/2A7F... --output cert.pem
-
-# Retrieve the Root CA certificate
-$ curl http://localhost:8080/ca/root --output root.pem
-
-# Retrieve the Intermediate CA certificate
-$ curl http://localhost:8080/ca/intermediate --output intermediate.pem
-
-# CRL endpoint
-$ curl http://localhost:8080/crl?ca=intermediate --output intermediate.crl.pem
-$ openssl crl -inform PEM -in intermediate.crl.pem -text -noout
-
-## Usage (Sprint 2)
-
-### Create Intermediate CA signed by Root CA
+### Создание промежуточного УЦ, подписанного корневым
 
 ```powershell
 Set-Content -Path secrets\inter.pass -Value "intermediate-passphrase" -NoNewline
 micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "CN=MicroPKI Intermediate CA,O=MicroPKI" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
 ```
 
-### Issue a server certificate
+### Выпуск серверного сертификата
 
 ```powershell
 micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template server --subject "CN=example.com,O=MicroPKI" --san dns:example.com --san dns:www.example.com --san ip:192.168.1.10 --out-dir pki\certs --validity-days 365
 ```
 
-### Issue a client certificate
+### Выпуск клиентского сертификата
 
 ```powershell
 micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template client --subject "CN=Alice Smith" --san email:alice@example.com --out-dir pki\certs
 ```
 
-### Issue a code signing certificate
+### Выпуск сертификата для подписи кода
 
 ```powershell
 micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template code_signing --subject "CN=MicroPKI Code Signer" --out-dir pki\certs
 ```
 
-### Validate certificate chain (leaf → intermediate → root)
+### Проверка цепочки сертификатов (лист → промежуточный → корневой)
 
 ```powershell
 micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pki\certs\intermediate.cert.pem --root pki\certs\ca.cert.pem
 ```
 
-OpenSSL interoperability:
+Совместимость с OpenSSL:
 
 ```bash
 openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/intermediate.cert.pem
 openssl verify -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
 ```
 
-## Usage (Sprint 4)
+## Использование (Спринт 3) — Сервер репозитория
 
-### Revoke a certificate
+### Инициализация базы данных сертификатов
 
 ```bash
-micropki ca revoke <serial_hex> --reason keyCompromise --db-path ./pki/micropki.db
+micropki db init --db-path ./pki/micropki.db
 ```
-Supported reasons include: `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`, `removeFromCRL`, `privilegeWithdrawn`, `aACompromise`.
 
-### Generate CRL
+### Запуск HTTP-сервера репозитория
+
+```bash
+micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs
+```
+
+### Примеры API-запросов (curl)
+
+```bash
+# Получить сертификат по серийному номеру
+curl http://localhost:8080/certificate/2A7F... --output cert.pem
+
+# Получить сертификат корневого УЦ
+curl http://localhost:8080/ca/root --output root.pem
+
+# Получить сертификат промежуточного УЦ
+curl http://localhost:8080/ca/intermediate --output intermediate.pem
+
+# Точка распространения CRL
+curl http://localhost:8080/crl?ca=intermediate --output intermediate.crl.pem
+openssl crl -inform PEM -in intermediate.crl.pem -text -noout
+```
+
+## Использование (Спринт 4) — Отзыв сертификатов и CRL
+
+### Отзыв сертификата
+
+```bash
+micropki ca revoke <серийный_номер_hex> --reason keyCompromise --db-path ./pki/micropki.db
+```
+
+Поддерживаемые причины отзыва: `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`, `removeFromCRL`, `privilegeWithdrawn`, `aACompromise`.
+
+### Генерация списка отозванных сертификатов (CRL)
 
 ```bash
 micropki ca gen-crl --ca-cert pki/certs/intermediate.cert.pem --ca-key pki/private/intermediate.key.pem --ca-pass-file secrets/inter.pass --out-dir ./pki --db-path ./pki/micropki.db --next-update 7
 ```
 
-## Project layout
+## Использование (Спринт 5) — OCSP-ответчик
+
+### Выпуск сертификата для OCSP-ответчика
+
+OCSP-ответчику нужен собственный сертификат с расширенным использованием ключа `id-kp-OCSPSigning`. Закрытый ключ сохраняется **без шифрования**, чтобы ответчик мог загрузить его без пароля:
+
+```powershell
+micropki ca issue-ocsp-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --subject "/CN=OCSP Responder" --san dns:localhost --out-dir pki\certs --validity-days 365
+```
+
+Результат:
+- `pki/certs/OCSP_Responder.cert.pem` — сертификат подписи OCSP
+- `pki/certs/OCSP_Responder.key.pem` — незашифрованный закрытый ключ
+
+### Запуск OCSP-ответчика
+
+```powershell
+micropki ocsp serve --host 127.0.0.1 --port 8081 --db-path ./pki/micropki.db --responder-cert ./pki/certs/OCSP_Responder.cert.pem --responder-key ./pki/certs/OCSP_Responder.key.pem --ca-cert ./pki/certs/intermediate.cert.pem
+```
+
+Сервер начинает слушать на `http://127.0.0.1:8081` и принимает GET и POST OCSP-запросы (RFC 6960).
+
+### Проверка статуса сертификата через OpenSSL
+
+Запрос статуса действующего сертификата:
+
+```powershell
+openssl ocsp -issuer pki\certs\intermediate.cert.pem -cert pki\certs\example.com.cert.pem -url http://127.0.0.1:8081 -VAfile pki\certs\OCSP_Responder.cert.pem
+```
+
+Ожидаемый вывод для действительного сертификата:
+
+```
+Response verify OK
+pki\certs\example.com.cert.pem: good
+    This Update: Apr  8 07:40:25 2026 GMT
+```
+
+### Отзыв и повторная проверка
+
+```powershell
+micropki ca revoke <серийный_номер_hex> --reason keyCompromise --force
+openssl ocsp -issuer pki\certs\intermediate.cert.pem -cert pki\certs\example.com.cert.pem -url http://127.0.0.1:8081 -VAfile pki\certs\OCSP_Responder.cert.pem
+```
+
+Ожидаемый вывод после отзыва:
+
+```
+Response verify OK
+pki\certs\example.com.cert.pem: revoked
+    This Update: Apr  8 07:47:17 2026 GMT
+    Reason: keyCompromise
+    Revocation Time: Apr  8 07:47:10 2026 GMT
+```
+
+## Структура проекта
 
 ```
 micropki/
   __init__.py
-  __main__.py       # python -m micropki
-  cli.py            # argument parser: ca init, issue-intermediate, issue-cert, verify, verify-chain, revoke, gen-crl
-  ca.py             # Root CA init, Intermediate CA, end-entity issuance, verify
-  certificates.py   # X.509 build and extensions, DN parsing
-  crl.py            # CRL generation tools
-  csr.py            # CSR generation, Intermediate/end-entity signing
-  database.py       # SQLite certificate and CRL metadata storage
-  repo.py           # HTTP Server for certificates and CRL distribution
-  repository.py     # Database CRUD operations
-  revocation.py     # Certificate revocation handling
-  templates.py      # Certificate templates (server, client, code_signing), SAN parsing
-  chain.py          # Chain validation: signatures, validity, constraints
-  crypto_utils.py   # PEM, key generation, encryption, passphrase loading
-  database.py       # SQLite schema, certificates + crl_metadata
-  repository.py     # HTTP repository (certificates, CA PEMs, CRL)
-  logger.py         # logging setup (file/stderr, ISO 8601)
-tests/              # pytest
-scripts/            # verify_key_cert_match.py
+  __main__.py         # python -m micropki
+  cli.py              # парсер аргументов для всех подкоманд
+  ca.py               # инициализация корневого УЦ, промежуточный УЦ, выпуск сертификатов, проверка
+  certificates.py     # построение X.509, расширения, разбор DN
+  chain.py            # валидация цепочки: подписи, сроки, ограничения
+  crl.py              # инструменты генерации CRL
+  crypto_utils.py     # PEM, генерация ключей, шифрование, загрузка паролей
+  csr.py              # генерация CSR, подписание промежуточным/конечным УЦ
+  database.py         # схема SQLite, таблицы certificates и crl_metadata
+  logger.py           # настройка логирования (файл/stderr, ISO 8601)
+  ocsp.py             # разбор OCSP-запросов и формирование ответов (RFC 6960)
+  ocsp_responder.py   # HTTP-сервер OCSP на базе FastAPI
+  repo.py             # HTTP-сервер для раздачи сертификатов и CRL
+  repository.py       # CRUD-операции с базой данных сертификатов
+  revocation.py       # обработка отзыва сертификатов
+  serial.py           # генерация и форматирование серийных номеров
+  templates.py        # шаблоны сертификатов (server, client, code_signing, ocsp)
+tests/                # pytest
+scripts/              # verify_key_cert_match.py
 requirements.txt
 pyproject.toml
 ```
 
-## License
+## Лицензия
 
-Educational / demonstration use.
+Для образовательных целей и демонстрации.
