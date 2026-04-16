@@ -1,5 +1,3 @@
-"""Unit tests: DN parsing, certificate building, PEM serialization."""
-
 import pytest
 from cryptography import x509
 
@@ -8,7 +6,6 @@ from micropki import crypto_utils
 
 
 def test_parse_subject_dn_slash_notation():
-    """DN with /CN=... is accepted and parsed to x509.Name."""
     name = certificates.parse_subject_dn("/CN=My Root CA")
     assert name.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME) == [
         x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "My Root CA")
@@ -16,7 +13,6 @@ def test_parse_subject_dn_slash_notation():
 
 
 def test_parse_subject_dn_comma_notation():
-    """DN with CN=...,O=...,C=... is accepted."""
     name = certificates.parse_subject_dn("CN=ECC Root CA,O=MicroPKI,C=US")
     assert name.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value == "ECC Root CA"
     assert name.get_attributes_for_oid(x509.oid.NameOID.ORGANIZATION_NAME)[0].value == "MicroPKI"
@@ -24,7 +20,6 @@ def test_parse_subject_dn_comma_notation():
 
 
 def test_parse_subject_dn_empty_fails():
-    """Empty or whitespace-only subject raises ValueError."""
     with pytest.raises(ValueError, match="empty"):
         certificates.parse_subject_dn("")
     with pytest.raises(ValueError, match="empty"):
@@ -32,13 +27,11 @@ def test_parse_subject_dn_empty_fails():
 
 
 def test_parse_subject_dn_invalid_component_fails():
-    """DN component without = raises ValueError."""
     with pytest.raises(ValueError, match="missing ="):
         certificates.parse_subject_dn("CN=OK,Invalid")
 
 
 def test_cert_to_pem_roundtrip():
-    """Certificate serialized to PEM can be loaded back."""
     key = crypto_utils.generate_rsa_key(4096)
     cert = certificates.build_self_signed_root_ca(
         subject_dn="/CN=Test",
@@ -54,7 +47,6 @@ def test_cert_to_pem_roundtrip():
 
 
 def test_certificate_extensions_and_fields():
-    """X.509v3 extensions: BC, KU, SKI, AKI, Subject=Issuer, serial >0 (PKI-2, PKI-3)."""
     key = crypto_utils.generate_rsa_key(4096)
     cert = certificates.build_self_signed_root_ca(
         subject_dn="CN=Root Test,O=MicroPKI,C=US",

@@ -1,5 +1,3 @@
-"""Unit tests for chain validation module."""
-
 import pytest
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +12,6 @@ from micropki.templates import get_template_extensions, parse_san_list
 
 @pytest.fixture(scope="module")
 def pki_chain():
-    """Build a Root → Intermediate → Leaf chain for unit tests."""
     root_key = crypto_utils.generate_rsa_key(4096)
     root_cert = certificates.build_self_signed_root_ca(
         "/CN=Unit Root CA", root_key, 3650, "rsa", 4096,

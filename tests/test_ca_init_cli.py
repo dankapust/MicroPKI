@@ -1,5 +1,3 @@
-"""CLI and CA init integration: negative cases, overwrite, verify (TEST-4, TEST-1)."""
-
 import os
 import subprocess
 import sys
@@ -10,7 +8,6 @@ import pytest
 
 
 def _run_micropki(*args):
-    """Run micropki CLI via `python -m micropki`; return (returncode, stdout, stderr)."""
     result = subprocess.run(
         [sys.executable, "-m", "micropki"] + list(args),
         capture_output=True,
@@ -21,7 +18,6 @@ def _run_micropki(*args):
 
 
 def test_cli_ca_init_missing_subject():
-    """Missing --subject exits non-zero with clear error (TEST-4)."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
@@ -38,7 +34,6 @@ def test_cli_ca_init_missing_subject():
 
 
 def test_cli_ca_init_invalid_key_type_ecc_with_256():
-    """--key-type ecc with --key-size 256 must fail (TEST-4)."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
@@ -56,7 +51,6 @@ def test_cli_ca_init_invalid_key_type_ecc_with_256():
 
 
 def test_cli_ca_init_invalid_dn():
-    """Invalid DN syntax exits non-zero (TEST-4)."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
@@ -74,7 +68,6 @@ def test_cli_ca_init_invalid_dn():
 
 
 def test_cli_ca_init_nonexistent_passphrase_file():
-    """Non-existent --passphrase-file exits non-zero (TEST-4)."""
     code, out, err = _run_micropki(
         "ca", "init",
         "--subject", "/CN=Test",
@@ -86,7 +79,6 @@ def test_cli_ca_init_nonexistent_passphrase_file():
 
 
 def test_cli_ca_init_and_verify_self_signed(tmp_path):
-    """Full flow: ca init, then ca verify (TEST-1 self-consistency)."""
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -110,7 +102,6 @@ def test_cli_ca_init_and_verify_self_signed(tmp_path):
 
 
 def test_cli_ca_init_ecc(tmp_path):
-    """ECC P-384 init succeeds and produces valid cert (PKI-1, PKI-2)."""
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -131,7 +122,6 @@ def test_cli_ca_init_ecc(tmp_path):
 
 
 def test_cli_ca_init_log_file(tmp_path):
-    """--log-file writes log entries with ISO 8601, level, mandatory events (LOG-1, LOG-2)."""
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -159,7 +149,6 @@ def test_cli_ca_init_log_file(tmp_path):
 
 
 def test_cli_ca_init_unwritable_outdir():
-    """Unwritable --out-dir exits non-zero (TEST-4)."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
@@ -177,7 +166,6 @@ def test_cli_ca_init_unwritable_outdir():
 
 
 def test_cli_ca_init_refuse_overwrite_without_force(tmp_path):
-    """Without --force, overwriting existing key/cert should fail (CLI-6)."""
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -198,7 +186,6 @@ def test_cli_ca_init_refuse_overwrite_without_force(tmp_path):
 
 
 def test_cli_ca_init_with_force_overwrites(tmp_path):
-    """With --force, existing key/cert can be overwritten."""
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"

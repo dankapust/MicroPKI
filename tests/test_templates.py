@@ -1,5 +1,3 @@
-"""Unit tests: SAN parsing, template validation, extension building (TEST-12)."""
-
 import pytest
 from cryptography import x509
 
