@@ -37,6 +37,8 @@ def init_server(
     ca_key: str | None = None,
     ca_pass_file: str | None = None,
     db_path: str = "./pki/micropki.db",
+    rate_limit: float = 0,
+    rate_burst: int = 10,
 ):
     global logger
     logger = setup_logging(log_file)
@@ -54,6 +56,12 @@ def init_server(
         logger.info("CA signing enabled for /request-cert endpoint")
     else:
         logger.warning("CA signing NOT configured. POST /request-cert will be unavailable.")
+    # Rate limiting
+    if rate_limit > 0:
+        from .ratelimit import create_rate_limit_middleware
+        middleware_fn = create_rate_limit_middleware(rate_limit, rate_burst)
+        app.middleware("http")(middleware_fn)
+        logger.info("Rate limiting enabled: %s req/s, burst=%d", rate_limit, rate_burst)
     logger.info("Repository server initialised. Serving certificates from %s", CERT_DIR)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

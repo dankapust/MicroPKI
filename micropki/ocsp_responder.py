@@ -27,7 +27,9 @@ def init_ocsp_server(
     responder_cert_path: str,
     responder_key_path: str,
     issuer_cert_path: str,
-    log_file: str | None = None
+    log_file: str | None = None,
+    rate_limit: float = 0,
+    rate_burst: int = 10,
 ):
     CONFIG["logger"] = setup_logging(log_file)
     CONFIG["db_path"] = db_path
@@ -38,6 +40,12 @@ def init_ocsp_server(
     except Exception as e:
         CONFIG["logger"].error("Failed to load certificates/keys for OCSP: %s", e)
         raise RuntimeError(f"OCSP Init failed: {e}")
+    # Rate limiting
+    if rate_limit > 0:
+        from .ratelimit import create_rate_limit_middleware
+        middleware_fn = create_rate_limit_middleware(rate_limit, rate_burst)
+        app.middleware("http")(middleware_fn)
+        CONFIG["logger"].info("Rate limiting enabled: %s req/s, burst=%d", rate_limit, rate_burst)
     CONFIG["logger"].info("OCSP responder initialised and ready.")
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

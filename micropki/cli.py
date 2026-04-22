@@ -52,8 +52,8 @@ def _default_db_path_for_out_dir(out_dir: str) -> str:
     return str(out / "micropki.db")
 def _validate_key_type_size(parser, key_type: str, key_size: int) -> None:
     key_type = (key_type or "").lower()
-    if key_type == "rsa" and key_size not in (2048, 4096):
-        parser.error("--key-size must be 2048 or 4096 for RSA")
+    if key_type == "rsa" and key_size not in (2048, 3072, 4096):
+        parser.error("--key-size must be 2048, 3072 or 4096 for RSA")
     if key_type == "ecc" and key_size not in (256, 384):
         parser.error("--key-size must be 256 or 384 for ECC")
 def cmd_ca_init(args) -> int:
@@ -184,7 +184,7 @@ def cmd_ca_list_certs(args) -> int:
     log = log_module.setup_logging(getattr(args, "log_file", None))
     try:
         status_filter = args.status if args.status in ("valid", "revoked") else None
-        rows = database.list_certificates(args.db_path, status=status_filter)
+        rows = repository.list_certificates(status=status_filter, db_path=args.db_path)
         if args.status == "expired":
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
@@ -195,28 +195,36 @@ def cmd_ca_list_certs(args) -> int:
         return 1
     if args.format == "json":
         import json
-        print(json.dumps([dict(r) for r in rows], ensure_ascii=False, indent=2))
+        output = []
+        for r in rows:
+            d = dict(r)
+            if "serial_hex" not in d and "serial_number" in d:
+                d["serial_hex"] = d["serial_number"]
+            output.append(d)
+        print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
     if args.format == "csv":
         print("serial,subject,expiration,status")
         for r in rows:
-            print(f"{r['serial_hex']},{r['subject']},{r['not_after']},{r['status']}")
+            sn = r.get('serial_hex', r.get('serial_number', ''))
+            print(f"{sn},{r['subject']},{r['not_after']},{r['status']}")
         return 0
     print(f"{'SERIAL':<20} {'STATUS':<8} {'EXPIRES':<22} SUBJECT")
     print("-" * 95)
     for r in rows:
-        print(f"{r['serial_hex']:<20} {r['status']:<8} {r['not_after']:<22} {r['subject']}")
+        sn = r.get('serial_hex', r.get('serial_number', ''))
+        print(f"{sn:<20} {r['status']:<8} {r['not_after']:<22} {r['subject']}")
     return 0
 def cmd_ca_show_cert(args) -> int:
     log = log_module.setup_logging(getattr(args, "log_file", None))
     serial_hex = args.serial.strip()
     try:
-        int(serial_hex, 16)
+        serial_number = int(serial_hex, 16)
     except ValueError:
         print("Error: serial must be hex", file=sys.stderr)
         return 1
     try:
-        row = database.get_certificate_by_serial(args.db_path, serial_hex)
+        row = repository.get_certificate_by_serial(serial_number, db_path=args.db_path)
     except Exception as e:
         log.error("Database query failed: %s", e)
         print(f"Error: {e}", file=sys.stderr)
@@ -321,6 +329,40 @@ def cmd_ca_check_revoked(args) -> int:
         log.error("Check revocation failed: %s", e)
         print(f"Error: {e}", file=sys.stderr)
         return 1
+def cmd_ca_compromise(args) -> int:
+    log = log_module.setup_logging(getattr(args, "log_file", None))
+    from . import compromise
+    if not args.force:
+        try:
+            ans = input(f"Simulate compromise for {args.cert}? [y/N]: ")
+            if ans.lower() != 'y':
+                print("Aborted.")
+                return 0
+        except EOFError:
+            print("Aborted.")
+            return 0
+    try:
+        result = compromise.mark_compromised(
+            db_path=args.db_path,
+            cert_path=args.cert,
+            reason=args.reason,
+            audit_dir=str(Path(args.db_path).parent / "audit") if args.db_path else "./pki/audit",
+            ca_cert_path=getattr(args, "ca_cert", None),
+            ca_key_path=getattr(args, "ca_key", None),
+            ca_pass_file=getattr(args, "ca_pass_file", None),
+            out_dir=getattr(args, "out_dir", None),
+        )
+        print(f"Certificate {result['serial']} marked as compromised.")
+        print(f"Public key hash: {result['public_key_hash']}")
+        if result['revoked']:
+            print("Certificate has been revoked with reason keyCompromise.")
+        else:
+            print("Certificate was already revoked.")
+        return 0
+    except Exception as e:
+        log.exception("Compromise simulation failed")
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 def cmd_ocsp_serve(args) -> int:
     import uvicorn
     from .ocsp_responder import init_ocsp_server, app
@@ -330,7 +372,9 @@ def cmd_ocsp_serve(args) -> int:
             responder_cert_path=args.responder_cert,
             responder_key_path=args.responder_key,
             issuer_cert_path=args.ca_cert,
-            log_file=args.log_file
+            log_file=args.log_file,
+            rate_limit=getattr(args, "rate_limit", 0),
+            rate_burst=getattr(args, "rate_burst", 10),
         )
         sys.exit(uvicorn.run(app, host=args.host, port=args.port, log_level="info"))
     except Exception as e:
@@ -349,38 +393,6 @@ def cmd_db_init(args):
         log.error("Database initialization failed: %s", e)
         print(f"Error: {e}", file=sys.stderr)
         return 1
-def cmd_ca_list_certs(args):
-    from . import repository
-    try:
-        certs = repository.list_certificates(status=getattr(args, "status", None), db_path=args.db_path)
-        if not certs:
-            print("No certificates found.", file=sys.stderr)
-            return 0
-        print(f"{'SERIAL':<40} | {'STATUS':<10} | {'NOT AFTER':<20} | {'SUBJECT'}")
-        print("-" * 100)
-        for cert in certs:
-            print(f"{cert['serial_number']:<40} | {cert['status']:<10} | {cert['not_after'][:19]:<20} | {cert['subject']}")
-        return 0
-    except Exception as e:
-        print(f"Error listing certificates: {e}", file=sys.stderr)
-        return 1
-def cmd_ca_show_cert(args):
-    from . import repository
-    try:
-        serial_number = int(args.serial, 16)
-        cert = repository.get_certificate_by_serial(serial_number, db_path=args.db_path)
-        if not cert:
-            print(f"Certificate not found: {args.serial}", file=sys.stderr)
-            return 1
-        for k, v in cert.items():
-            print(f"{k}: {v}")
-        return 0
-    except ValueError:
-        print(f"Invalid serial format: {args.serial}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error showing certificate: {e}", file=sys.stderr)
-        return 1
 def cmd_repo_serve(args):
     import uvicorn
     from .repo import init_server, app
@@ -391,6 +403,8 @@ def cmd_repo_serve(args):
         ca_key=getattr(args, "ca_key", None),
         ca_pass_file=getattr(args, "ca_pass_file", None),
         db_path=args.db_path,
+        rate_limit=getattr(args, "rate_limit", 0),
+        rate_burst=getattr(args, "rate_burst", 10),
     )
     sys.exit(uvicorn.run(app, host=args.host, port=args.port, log_level="info"))
 def cmd_client_gen_csr(args) -> int:
@@ -487,6 +501,55 @@ def cmd_ca_issue_ocsp_cert(args) -> int:
         log.error("issue-ocsp-cert failed: %s", getattr(e, "message", str(e)))
         print(f"Error: {e}", file=sys.stderr)
         return 1
+def cmd_audit_query(args) -> int:
+        from . import audit as audit_module
+    import json as json_mod
+
+    log_path = getattr(args, "log_file_path", "./pki/audit/audit.log")
+    entries = audit_module.query_log(
+        log_path=log_path,
+        from_ts=getattr(args, "from_ts", None),
+        to_ts=getattr(args, "to_ts", None),
+        level=getattr(args, "level", None),
+        operation=getattr(args, "operation", None),
+        serial=getattr(args, "serial", None),
+    )
+
+    if getattr(args, "verify", False):
+        chain_path = str(Path(log_path).parent / "chain.dat")
+        ok, bad_idx = audit_module.verify_log(log_path, chain_path)
+        if not ok:
+            print(f"INTEGRITY FAILURE: tampered at entry {bad_idx}", file=sys.stderr)
+            return 1
+        print("Integrity check: OK")
+
+    fmt = getattr(args, "format", "table")
+    if fmt == "json":
+        print(json_mod.dumps(entries, ensure_ascii=False, indent=2))
+    elif fmt == "csv":
+        print("timestamp,level,operation,status,message")
+        for e in entries:
+            print(f"{e.get('timestamp','')},{e.get('level','')},{e.get('operation','')},{e.get('status','')},{e.get('message','')}")
+    else:
+        print(f"{'TIMESTAMP':<28} {'LEVEL':<8} {'OPERATION':<22} {'STATUS':<8} MESSAGE")
+        print("-" * 110)
+        for e in entries:
+            print(f"{e.get('timestamp',''):<28} {e.get('level',''):<8} {e.get('operation',''):<22} {e.get('status',''):<8} {e.get('message','')}")
+    return 0
+
+def cmd_audit_verify(args) -> int:
+        from . import audit as audit_module
+
+    log_path = getattr(args, "log_file_path", "./pki/audit/audit.log")
+    chain_path = getattr(args, "chain_file", "./pki/audit/chain.dat")
+
+    ok, bad_idx = audit_module.verify_log(log_path, chain_path)
+    if ok:
+        print("Audit log integrity: OK")
+        return 0
+    else:
+        print(f"INTEGRITY FAILURE: first corrupted entry at index {bad_idx}", file=sys.stderr)
+        return 1
 def main() -> None:
     parser = argparse.ArgumentParser(prog="micropki", description="MicroPKI - minimal PKI")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -498,6 +561,9 @@ def main() -> None:
     repo_sub = repo_parser.add_subparsers(dest="repo_command")
     ocsp_parser = subparsers.add_parser("ocsp", help="OCSP responder functions")
     ocsp_sub = ocsp_parser.add_subparsers(dest="ocsp_command")
+    audit_parser = subparsers.add_parser("audit", help="Audit log operations")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command")
+
     p_init = db_sub.add_parser("init", help="Initialise the certificate database")
     p_init.set_defaults(_parser=p_init, _run=cmd_db_init)
     p_init.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database")
@@ -513,6 +579,8 @@ def main() -> None:
     p_serve.add_argument("--ca-cert", default=None, help="CA cert PEM for /request-cert")
     p_serve.add_argument("--ca-key", default=None, help="CA key PEM for /request-cert")
     p_serve.add_argument("--ca-pass-file", default=None, help="CA passphrase file for /request-cert")
+    p_serve.add_argument("--rate-limit", type=float, default=0, help="Requests/sec per client IP (0=disabled)")
+    p_serve.add_argument("--rate-burst", type=int, default=10, help="Burst allowance")
     p_serve.add_argument("--log-file", default=None)
     p = ca_sub.add_parser("init", help="Create self-signed Root CA")
     p.set_defaults(_parser=p, _run=cmd_ca_init)
@@ -609,6 +677,17 @@ def main() -> None:
     p.add_argument("serial", help="Serial number of the certificate (hex)")
     p.add_argument("--db-path", default="./pki/micropki.db")
     p.add_argument("--log-file", default=None)
+    p = ca_sub.add_parser("compromise", help="Simulate private key compromise")
+    p.set_defaults(_parser=p, _run=cmd_ca_compromise)
+    p.add_argument("--cert", required=True, help="Path to certificate of compromised key")
+    p.add_argument("--reason", default="keyCompromise", help="Reason code")
+    p.add_argument("--force", action="store_true", help="Skip confirmation")
+    p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--ca-cert", default=None, help="CA cert for emergency CRL")
+    p.add_argument("--ca-key", default=None, help="CA key for emergency CRL")
+    p.add_argument("--ca-pass-file", default=None, help="CA pass file for emergency CRL")
+    p.add_argument("--out-dir", default="./pki", help="PKI output directory")
+    p.add_argument("--log-file", default=None)
     p = ocsp_sub.add_parser("serve", help="Start the OCSP responder")
     p.set_defaults(_run=cmd_ocsp_serve)
     p.add_argument("--host", default="127.0.0.1")
@@ -618,7 +697,23 @@ def main() -> None:
     p.add_argument("--responder-key", required=True, help="OCSP key PEM")
     p.add_argument("--ca-cert", required=True, help="Issuer CA cert PEM")
     p.add_argument("--cache-ttl", type=int, default=60, help="Cache TTL (unused)")
+    p.add_argument("--rate-limit", type=float, default=0, help="Requests/sec per IP (0=disabled)")
+    p.add_argument("--rate-burst", type=int, default=10, help="Burst allowance")
     p.add_argument("--log-file", default=None)
+    p = audit_sub.add_parser("query", help="Query audit log entries")
+    p.set_defaults(_run=cmd_audit_query)
+    p.add_argument("--log-file-path", default="./pki/audit/audit.log", help="Audit log file")
+    p.add_argument("--from", dest="from_ts", default=None, help="Start timestamp (ISO 8601)")
+    p.add_argument("--to", dest="to_ts", default=None, help="End timestamp (ISO 8601)")
+    p.add_argument("--level", default=None, choices=["INFO", "WARNING", "ERROR", "AUDIT"])
+    p.add_argument("--operation", default=None, help="Filter by operation type")
+    p.add_argument("--serial", default=None, help="Filter by certificate serial")
+    p.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    p.add_argument("--verify", action="store_true", help="Verify hash chain integrity")
+    p = audit_sub.add_parser("verify", help="Verify audit log integrity")
+    p.set_defaults(_run=cmd_audit_verify)
+    p.add_argument("--log-file-path", default="./pki/audit/audit.log", help="Audit log file")
+    p.add_argument("--chain-file", default="./pki/audit/chain.dat", help="Hash chain file")
     p = client_sub.add_parser("gen-csr", help="Generate private key and CSR")
     p.set_defaults(_run=cmd_client_gen_csr)
     p.add_argument("--subject", required=True, help="Subject DN")
@@ -691,6 +786,13 @@ def main() -> None:
     elif args.command == "client":
         if not getattr(args, "client_command", None):
             client_parser.print_help()
+            sys.exit(0)
+        run = getattr(args, "_run", None)
+        if run:
+            sys.exit(run(args))
+    elif args.command == "audit":
+        if not getattr(args, "audit_command", None):
+            audit_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:

@@ -342,10 +342,132 @@ micropki/
   serial.py            # серийные номера
   templates.py         # шаблоны (server, client, code_signing, ocsp)
   validation.py        # валидация цепочки по RFC 5280
+  audit.py             # аудит-логирование (NDJSON + SHA-256 hash chain)
+  policy.py            # политики безопасности (ключи, сроки, SAN, алгоритмы)
+  ratelimit.py         # ограничение запросов (token bucket per IP)
+  transparency.py      # симуляция Certificate Transparency (CT) лога
+  compromise.py        # компрометация ключей (блокировка, экстренный CRL)
 tests/                 # pytest
 scripts/               # verify_key_cert_match.py
 requirements.txt
 pyproject.toml
+```
+
+## Использование (Спринт 7) — Безопасность и аудит
+
+### Система аудита
+
+Все критические операции записываются в NDJSON-файл `./pki/audit/audit.log` с криптографической цепочкой хешей SHA-256. Каждая запись содержит:
+
+- `timestamp` — время в ISO 8601 с микросекундами
+- `level` — уровень (AUDIT, INFO, ERROR)
+- `operation` — тип операции (ca_init, issue_certificate, revoke_certificate и т.д.)
+- `status` — результат (started, success, failure)
+- `message` — описание
+- `metadata` — детали (serial, subject, template, reason)
+- `integrity` — хеш-цепочка (`prev_hash`, `hash`)
+
+**Запрос аудит-лога:**
+
+```powershell
+# Все записи
+micropki audit query
+
+# Фильтрация по операции и формат JSON
+micropki audit query --operation issue_certificate --format json
+
+# Фильтрация по уровню
+micropki audit query --level AUDIT --format table
+
+# С проверкой целостности
+micropki audit query --verify
+```
+
+**Проверка целостности аудит-лога:**
+
+```powershell
+micropki audit verify
+# Вывод: "Audit log integrity: OK" или "INTEGRITY FAILURE: ..."
+```
+
+### Политики безопасности
+
+Все политики проверяются автоматически при выпуске сертификатов:
+
+| Политика | Правило |
+|----------|---------|
+| Размер RSA-ключа (Root) | ≥ 4096 бит |
+| Размер RSA-ключа (Intermediate) | ≥ 3072 бит |
+| Размер RSA-ключа (End-entity) | ≥ 2048 бит |
+| ECC-ключ (Root/Intermediate) | P-384 |
+| ECC-ключ (End-entity) | P-256 или P-384 |
+| Срок действия Root CA | ≤ 3650 дней |
+| Срок действия Intermediate CA | ≤ 1825 дней |
+| Срок действия конечного сертификата | ≤ 365 дней |
+| Wildcard SAN (*.example.com) | Запрещён по умолчанию |
+| SAN-типы для server | Только dns, ip |
+| SAN-типы для client | dns, email |
+| SAN-типы для code_signing | dns, uri |
+| Path length (Intermediate) | Должен быть 0 |
+| Алгоритм подписи | SHA-256+ (SHA-1 запрещён) |
+
+При нарушении политики выпуск блокируется, создаётся запись AUDIT.
+
+### Ограничение запросов (Rate Limiting)
+
+Серверы репозитория и OCSP поддерживают rate limiting по IP:
+
+```powershell
+# Репозиторий с ограничением 5 запросов/сек, burst 10
+micropki repo serve --host 127.0.0.1 --port 8080 --rate-limit 5 --rate-burst 10
+
+# OCSP-ответчик с ограничением
+micropki ocsp serve --responder-cert ... --responder-key ... --ca-cert ... --rate-limit 10 --rate-burst 20
+```
+
+При превышении лимита сервер возвращает HTTP 429 с заголовком `Retry-After`.
+
+### Симуляция Certificate Transparency (CT)
+
+Каждый выпущенный сертификат записывается в `./pki/audit/ct.log`. Формат строки:
+```
+timestamp | serial_hex | subject_dn | sha256_fingerprint | issuer_dn
+```
+
+Проверка включения сертификата в CT-лог — поиск серийного номера:
+```powershell
+Select-String -Path .\pki\audit\ct.log -Pattern "SERIAL_HEX"
+```
+
+### Симуляция компрометации ключа
+
+```powershell
+# Пометить ключ сертификата как скомпрометированный
+micropki ca compromise --cert pki\certs\example.com.cert.pem --force --db-path pki\micropki.db
+
+# С генерацией экстренного CRL
+micropki ca compromise --cert pki\certs\example.com.cert.pem --force --db-path pki\micropki.db --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --out-dir pki
+```
+
+После компрометации:
+- Сертификат отзывается с причиной `keyCompromise`
+- Хеш публичного ключа записывается в таблицу `compromised_keys`
+- Любой будущий CSR с тем же ключом будет отклонён
+- Создаётся запись AUDIT высокой важности
+- Опционально генерируется экстренный CRL
+
+### Расширение БД
+
+Таблица `compromised_keys` создаётся автоматически при `db init`:
+
+```sql
+CREATE TABLE IF NOT EXISTS compromised_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_key_hash TEXT UNIQUE NOT NULL,
+    certificate_serial TEXT NOT NULL,
+    compromise_date TEXT NOT NULL,
+    compromise_reason TEXT NOT NULL
+);
 ```
 
 ## Лицензия

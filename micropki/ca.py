@@ -13,6 +13,21 @@ from . import logger as log_module
 from . import repository
 from . import serial as serial_module
 from . import templates as tmpl
+from .audit import get_audit_logger
+from .policy import (
+    PolicyViolationError, check_key_size, check_validity_period,
+    check_san_policy, check_csr_key_size, check_csr_algorithm,
+    check_path_length, check_public_key_size,
+)
+from . import transparency
+from . import compromise as compromise_module
+
+
+def _audit_dir_from_out(out_dir: str) -> str:
+        out = Path(out_dir)
+    return str(out / "audit")
+
+
 def resolve_local_ca_for_issuer(
     out_dir: str,
     issuer_rfc4514: str,
@@ -42,6 +57,17 @@ def init_root_ca(
     db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     logger = log_module.setup_logging(log_file)
+    audit = get_audit_logger(_audit_dir_from_out(out_dir))
+    audit.log_event("ca_init", "started", f"Root CA initialisation requested: {subject}",
+                    {"subject": subject, "key_type": key_type, "key_size": key_size}, "AUDIT")
+    try:
+        check_key_size(key_type, key_size, "root")
+        check_validity_period(validity_days, "root")
+    except PolicyViolationError as e:
+        audit.log_event("ca_init", "failure", f"Policy violation: {e}",
+                        {"subject": subject, "error": str(e)}, "AUDIT")
+        raise
+
     out = Path(out_dir)
     (out / "crl").mkdir(parents=True, exist_ok=True)
     key_path = out / "private" / "ca.key.pem"
@@ -72,6 +98,11 @@ def init_root_ca(
         )
     except Exception as e:
         logger.warning("Could not insert Root CA into DB: %s", e)
+    transparency.log_certificate(cert, _audit_dir_from_out(out_dir))
+    audit.log_event("ca_init", "success",
+                    f"Root CA initialised: CN={_extract_cn(subject)}, serial={cert.serial_number:X}",
+                    {"serial": f"{cert.serial_number:X}", "subject": cert.subject.rfc4514_string()}, "AUDIT")
+
     algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
     policy_path.write_text(_build_root_policy(
         subject, f"{cert.serial_number:x}",
@@ -85,6 +116,19 @@ def issue_intermediate_ca(
     pathlen: int = 0, db_path: str | None = None, log_file: str | None = None, force: bool = False,
 ) -> None:
     logger = log_module.setup_logging(log_file)
+    audit = get_audit_logger(_audit_dir_from_out(out_dir))
+    audit.log_event("issue_intermediate", "started",
+                    f"Intermediate CA issuance requested: {subject}",
+                    {"subject": subject, "key_type": key_type, "key_size": key_size}, "AUDIT")
+    try:
+        check_key_size(key_type, key_size, "intermediate")
+        check_validity_period(validity_days, "intermediate")
+        check_path_length(pathlen, "intermediate")
+    except PolicyViolationError as e:
+        audit.log_event("issue_intermediate", "failure", f"Policy violation: {e}",
+                        {"subject": subject, "error": str(e)}, "AUDIT")
+        raise
+
     out = Path(out_dir)
     (out / "crl").mkdir(parents=True, exist_ok=True)
     key_path = out / "private" / "intermediate.key.pem"
@@ -122,6 +166,12 @@ def issue_intermediate_ca(
         )
     except Exception as e:
         logger.warning("Could not insert Intermediate CA into DB: %s", e)
+    transparency.log_certificate(inter_cert, _audit_dir_from_out(out_dir))
+    audit.log_event("issue_intermediate", "success",
+                    f"Intermediate CA issued: serial={inter_cert.serial_number:X}",
+                    {"serial": f"{inter_cert.serial_number:X}",
+                     "subject": inter_cert.subject.rfc4514_string()}, "AUDIT")
+
     algo_desc = f"RSA-{key_size}" if key_type == "rsa" else "ECC-P384"
     _append_intermediate_policy(
         policy_path, subject, f"{inter_cert.serial_number:x}",
@@ -145,6 +195,15 @@ def issue_end_entity(
     (pki_root / "crl").mkdir(parents=True, exist_ok=True)
     db_path = db_path or str(pki_root / "micropki.db")
     database.init_database(db_path)
+
+    audit = get_audit_logger(str(pki_root / "audit"))
+    try:
+        check_validity_period(validity_days, "end_entity")
+    except PolicyViolationError as e:
+        audit.log_event("issue_certificate", "failure", f"Policy violation: {e}",
+                        {"subject": subject, "template": template, "error": str(e)}, "AUDIT")
+        raise
+
     ext_csr = None
     if csr_pem:
         ext_csr = x509.load_pem_x509_csr(csr_pem.encode("utf-8") if isinstance(csr_pem, str) else csr_pem)
@@ -153,10 +212,24 @@ def issue_end_entity(
     if ext_csr is not None:
         if not ext_csr.is_signature_valid:
             raise ValueError("CSR signature verification failed")
+        try:
+            check_csr_key_size(ext_csr, "end_entity")
+            check_csr_algorithm(ext_csr)
+        except PolicyViolationError as e:
+            audit.log_event("issue_certificate", "failure", f"Policy violation (CSR): {e}",
+                            {"subject": subject, "template": template, "error": str(e)}, "AUDIT")
+            raise
+
         pub = ext_csr.public_key()
         from cryptography.hazmat.primitives.asymmetric import rsa as rsa_mod, ec as ec_mod
         if isinstance(pub, rsa_mod.RSAPublicKey) and pub.key_size < 2048:
             raise ValueError(f"CSR key too small: {pub.key_size} bits (minimum 2048)")
+        if compromise_module.is_key_compromised(db_path, pub):
+            err = "CSR uses a compromised public key — issuance blocked"
+            audit.log_event("issue_certificate", "failure", err,
+                            {"subject": subject, "template": template}, "AUDIT")
+            raise PolicyViolationError(err)
+
         try:
             bc_req = ext_csr.extensions.get_extension_for_class(x509.BasicConstraints)
             if bc_req.value.ca:
@@ -205,9 +278,20 @@ def issue_end_entity(
         public_key = leaf_key.public_key()
         logger.info("Key pair generated for %s", subject)
     san_names = tmpl.parse_san_list(san_strings) if san_strings else []
+    try:
+        check_san_policy(template, san_names)
+    except PolicyViolationError as e:
+        audit.log_event("issue_certificate", "failure", f"Policy violation (SAN): {e}",
+                        {"subject": subject, "template": template, "error": str(e)}, "AUDIT")
+        raise
+
     tmpl.validate_san_for_template(template, san_names)
     base_name = _safe_filename(_extract_cn(subject))
     ext = tmpl.get_template_extensions(template, san_names, is_rsa=crypto_utils.is_rsa_key(public_key))
+    audit.log_event("issue_certificate", "started",
+                    f"Certificate issuance started for {subject} (template={template})",
+                    {"subject": subject, "template": template}, "AUDIT")
+
     logger.info("Issuing %s certificate for %s", template, subject)
     cert = csr_module.issue_end_entity_cert(
         subject_dn=subject, public_key=public_key,
@@ -230,6 +314,12 @@ def issue_end_entity(
     if leaf_key is not None:
         key_file = out / f"{base_name}.key.pem"
         crypto_utils.write_private_key_unencrypted(str(key_file), leaf_key, logger=logger)
+    transparency.log_certificate(cert, str(pki_root / "audit"))
+    audit.log_event("issue_certificate", "success",
+                    f"Issued {template} certificate for {subject}",
+                    {"serial": f"{cert.serial_number:X}", "subject": subject,
+                     "template": template}, "AUDIT")
+
     return cert_pem_bytes.decode("utf-8")
 def verify_certificate(cert_path: str, log_file: str | None = None) -> bool:
     logger = log_module.setup_logging(log_file)
@@ -264,34 +354,9 @@ def _safe_filename(name: str) -> str:
     return safe or "cert"
 def _build_root_policy(subject, serial_hex, not_before, not_after, key_algo) -> str:
     created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return f"""MicroPKI Certificate Policy Document
-=====================================
-Policy Version: 1.0
-Creation Date: {created}
-CA Name (Subject DN): {subject}
-Certificate Serial Number (hex): {serial_hex}
-Validity Period:
-  NotBefore: {not_before.strftime('%Y-%m-%d %H:%M:%S UTC')}
-  NotAfter:  {not_after.strftime('%Y-%m-%d %H:%M:%S UTC')}
-Key Algorithm and Size: {key_algo}
-Purpose: Root CA for MicroPKI demonstration. This CA is the trust anchor
-for the MicroPKI PKI. Use only in non-production or lab environments.
-"""
-def _append_intermediate_policy(policy_path, subject, serial_hex,
+    return fdef _append_intermediate_policy(policy_path, subject, serial_hex,
                                 not_before, not_after, key_algo, pathlen, issuer_dn) -> None:
-    section = f"""
-Intermediate CA
----------------
-CA Name (Subject DN): {subject}
-Certificate Serial Number (hex): {serial_hex}
-Validity Period:
-  NotBefore: {not_before.strftime('%Y-%m-%d %H:%M:%S UTC')}
-  NotAfter:  {not_after.strftime('%Y-%m-%d %H:%M:%S UTC')}
-Key Algorithm and Size: {key_algo}
-Path Length Constraint: {pathlen}
-Issuer (Root CA) DN: {issuer_dn}
-"""
-    with open(policy_path, "a", encoding="utf-8") as f:
+    section = f    with open(policy_path, "a", encoding="utf-8") as f:
         f.write(section)
 def _insert_cert_record(db_path: str, cert) -> None:
     repository.insert_certificate(

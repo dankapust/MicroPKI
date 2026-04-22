@@ -53,6 +53,17 @@ def revoke(db_path: str | Path, serial_hex: str, reason_str: str, log_file: str 
     updated = database.set_certificate_revoked(db_path, serial_hex, reason_exact, revocation_date)
     if updated:
         log.info("Successfully revoked certificate %s with reason %s at %s", serial_hex, reason_exact, revocation_date)
+        # Audit logging (best-effort)
+        try:
+            from .audit import get_audit_logger
+            pki_root = Path(db_path).parent if Path(db_path).suffix == ".db" else Path("./pki")
+            audit = get_audit_logger(str(pki_root / "audit"))
+            audit.log_event("revoke_certificate", "success",
+                            f"Certificate {serial_hex} revoked with reason {reason_exact}",
+                            {"serial": serial_hex, "reason": reason_exact,
+                             "revocation_date": revocation_date}, "AUDIT")
+        except Exception:
+            pass
     else:
         log.warning("Certificate %s is already revoked.", serial_hex)
     return updated

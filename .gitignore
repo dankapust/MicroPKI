@@ -33,3 +33,7 @@ htmlcov/
 # Python packaging
 *.egg-info/
 *.egg-info
+
+# MicroPKI artifacts
+chain.dat
+policy.txt

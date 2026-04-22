@@ -41,6 +41,16 @@ def init_database(db_path: str | Path, log_file: str | None = None) -> None:
             )
         ''')
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_ca_subject ON crl_metadata(ca_subject)')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS compromised_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_key_hash TEXT UNIQUE NOT NULL,
+                certificate_serial TEXT NOT NULL,
+                compromise_date TEXT NOT NULL,
+                compromise_reason TEXT NOT NULL,
+                FOREIGN KEY (certificate_serial) REFERENCES certificates(serial_number)
+            )
+        ''')
         conn.commit()
         logger.info("Database initialised successfully at %s", db_path)
     except sqlite3.Error as e:
@@ -113,3 +123,49 @@ def update_crl_metadata(db_path: str | Path, ca_subject: str, crl_number: int,
         conn.commit()
     finally:
         conn.close()
+
+def insert_compromised_key(db_path: str | Path, public_key_hash: str,
+                           certificate_serial: str, compromise_date: str,
+                           compromise_reason: str) -> None:
+    """Insert a compromised key record into the database."""
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute('''
+            INSERT OR IGNORE INTO compromised_keys
+                (public_key_hash, certificate_serial, compromise_date, compromise_reason)
+            VALUES (?, ?, ?, ?)
+        ''', (public_key_hash, certificate_serial, compromise_date, compromise_reason))
+        conn.commit()
+    finally:
+        conn.close()
+
+def is_key_hash_compromised(db_path: str | Path, public_key_hash: str) -> bool:
+    """Return True if the given public key hash is in the compromised_keys table."""
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            'SELECT 1 FROM compromised_keys WHERE public_key_hash = ?',
+            (public_key_hash,)
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def get_cert_pem_by_serial(db_path: str | Path, serial_hex: str) -> str | None:
+    """Retrieve cert PEM by serial (hex string)."""
+    conn = get_db_connection(db_path)
+    try:
+        row = conn.execute(
+            'SELECT cert_pem FROM certificates WHERE serial_number = ?',
+            (serial_hex,)
+        ).fetchone()
+        return row["cert_pem"] if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+# Alias used by some modules
+init_db = init_database

@@ -89,4 +89,17 @@ def generate_crl(
         next_update.isoformat(),
         str(final_out_path)
     )
+
+    # Audit logging (best-effort)
+    try:
+        from .audit import get_audit_logger
+        pki_root = Path(out_dir)
+        audit = get_audit_logger(str(pki_root / "audit"))
+        audit.log_event("generate_crl", "success",
+                        f"CRL generated with {count} revoked certs for {ca_subject_str}",
+                        {"crl_number": crl_number, "revoked_count": count,
+                         "ca_subject": ca_subject_str}, "AUDIT")
+    except Exception:
+        pass
+
     return final_out_path
