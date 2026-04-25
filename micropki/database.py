@@ -167,5 +167,19 @@ def get_cert_pem_by_serial(db_path: str | Path, serial_hex: str) -> str | None:
     finally:
         conn.close()
 
+def get_certificate_by_serial(db_path: str | Path, serial_hex: str) -> dict | None:
+    from . import repository
+    try:
+        serial_number = int(serial_hex, 16)
+        return repository.get_certificate_by_serial(serial_number, db_path=db_path)
+    except ValueError:
+        return None
+def list_certificates(db_path: str | Path) -> list[dict]:
+    from . import repository
+    rows = repository.list_certificates(db_path=db_path)
+    for r in rows:
+        if "serial_hex" not in r and "serial_number" in r:
+            r["serial_hex"] = r["serial_number"]
+    return rows
 # Alias used by some modules
 init_db = init_database

@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 @pytest.fixture()
 def tmp_pki(tmp_path):
-        from micropki import crypto_utils, database, ca, serial as serial_mod
+    from micropki import crypto_utils, database, ca, serial as serial_mod
 
     pki = tmp_path / "pki"
     pki.mkdir()
@@ -67,7 +67,7 @@ def tmp_pki(tmp_path):
 class TestPolicyWeakKey:
     
     def test_weak_rsa_key_csr_rejected(self, tmp_pki):
-                from micropki import ca, crypto_utils
+        from micropki import ca, crypto_utils
         from micropki.policy import PolicyViolationError
         weak_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
         from cryptography.hazmat.primitives import hashes
@@ -100,7 +100,7 @@ class TestPolicyWeakKey:
         assert len(failure_entries) > 0, "Expected at least one failure audit entry"
 
     def test_policy_check_rsa_below_minimum(self):
-                from micropki.policy import PolicyViolationError, check_key_size
+        from micropki.policy import PolicyViolationError, check_key_size
 
         with pytest.raises(PolicyViolationError):
             check_key_size("rsa", 1024, "end_entity")

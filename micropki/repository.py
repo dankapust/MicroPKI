@@ -105,3 +105,56 @@ def update_certificate_status(serial_number: int, new_status: str,
     finally:
         if conn:
             conn.close()
+def create_server(host, port, db_path, cert_dir, logger, pki_dir=None):
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import json
+
+    class RepoHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/crl" or self.path == "/crl/intermediate.crl.pem":
+                p = Path(pki_dir or Path(db_path).parent) / "crl" / "intermediate.crl.pem"
+                if p.exists():
+                    self._send_file(p, "application/pkix-crl")
+                else:
+                    self.send_error(404)
+            elif self.path == "/ca/root":
+                p = Path(cert_dir) / "ca.cert.pem"
+                if p.exists(): self._send_file(p, "application/x-pem-file")
+                else: self.send_error(404)
+            elif self.path == "/ca/intermediate":
+                p = Path(cert_dir) / "intermediate.cert.pem"
+                if p.exists(): self._send_file(p, "application/x-pem-file")
+                else: self.send_error(404)
+            elif self.path.startswith("/certificate/"):
+                serial_hex = self.path.split("/")[-1].upper()
+                try:
+                    serial_int = int(serial_hex, 16)
+                    row = get_certificate_by_serial(serial_int, db_path=db_path)
+                    if row:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/x-pem-file")
+                        self.end_headers()
+                        self.wfile.write(row["cert_pem"].encode("utf-8"))
+                    else:
+                        self.send_error(404)
+                except ValueError:
+                    self.send_error(400)
+            else:
+                self.send_error(404)
+
+        def _send_file(self, path, content_type):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("ETag", "test")
+            self.send_header("Last-Modified", "test")
+            self.send_header("Cache-Control", "max-age=3600")
+            content = path.read_bytes()
+            self.send_header("Content-Length", len(content))
+            self.end_headers()
+            self.wfile.write(content)
+
+
+        def log_message(self, format, *args):
+            logger.info(format % args)
+
+    return HTTPServer((host, port), RepoHandler)

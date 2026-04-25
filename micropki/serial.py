@@ -8,3 +8,4 @@ def generate_serial() -> int:
     return serial
 def serial_to_hex(serial: int) -> str:
     return f"{serial:x}".upper()
+generate_serial_candidate = generate_serial

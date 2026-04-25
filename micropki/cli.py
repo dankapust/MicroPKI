@@ -288,8 +288,21 @@ def cmd_ca_gen_crl(args) -> int:
     log = log_module.setup_logging(getattr(args, "log_file", None))
     from . import crl
     parser = getattr(args, "_parser", argparse.ArgumentParser())
-    _validate_file_exists(parser, args.ca_cert, "--ca-cert")
-    _validate_file_exists(parser, args.ca_key, "--ca-key")
+    
+    ca_cert = getattr(args, "ca_cert", None)
+    ca_key = getattr(args, "ca_key", None)
+    ca_name = getattr(args, "ca", None)
+    out_dir = getattr(args, "out_dir", "./pki")
+    
+    if ca_name == "root":
+        if not ca_cert: ca_cert = str(Path(out_dir) / "certs" / "ca.cert.pem")
+        if not ca_key: ca_key = str(Path(out_dir) / "private" / "ca.key.pem")
+    elif ca_name == "intermediate":
+        if not ca_cert: ca_cert = str(Path(out_dir) / "certs" / "intermediate.cert.pem")
+        if not ca_key: ca_key = str(Path(out_dir) / "private" / "intermediate.key.pem")
+    
+    _validate_file_exists(parser, ca_cert, "--ca-cert")
+    _validate_file_exists(parser, ca_key, "--ca-key")
     _validate_passphrase_file(parser, args.ca_pass_file, "--ca-pass-file")
     try:
         ca_pass = crypto_utils.load_passphrase(args.ca_pass_file)
@@ -299,10 +312,10 @@ def cmd_ca_gen_crl(args) -> int:
         return 1
     try:
         out_path = crl.generate_crl(
-            ca_cert_path=args.ca_cert,
-            ca_key_path=args.ca_key,
+            ca_cert_path=ca_cert,
+            ca_key_path=ca_key,
             ca_passphrase=ca_pass,
-            out_dir=args.out_dir,
+            out_dir=out_dir,
             db_path=args.db_path,
             next_update_days=args.next_update,
             out_file=getattr(args, "out_file", None),
@@ -319,11 +332,20 @@ def cmd_ca_check_revoked(args) -> int:
     from . import revocation
     try:
         status_info = revocation.check_revocation(args.db_path, args.serial)
-        print(f"Certificate {status_info['serial']}:")
-        print(f"  Status: {status_info['status']}")
+        print(f"status={status_info['status']}")
         if status_info['status'] == 'revoked':
-            print(f"  Reason: {status_info['reason']}")
-            print(f"  Date:   {status_info['date']}")
+            print(f"reason={status_info['reason']}")
+            print(f"date={status_info['date']}")
+        
+        crl_path = getattr(args, "crl", None)
+        if crl_path:
+            from cryptography import x509
+            with open(crl_path, "rb") as f:
+                crl_obj = x509.load_pem_x509_crl(f.read())
+            serial_int = int(args.serial, 16)
+            is_in_crl = any(r.serial_number == serial_int for r in crl_obj)
+            print(f"crl_contains_serial={'yes' if is_in_crl else 'no'}")
+            
         return 0
     except Exception as e:
         log.error("Check revocation failed: %s", e)
@@ -666,11 +688,13 @@ def main() -> None:
     p.add_argument("--reason", default="unspecified", help="Revocation reason code")
     p.add_argument("--db-path", default="./pki/micropki.db", help="Path to DB")
     p.add_argument("--force", action="store_true", help="Skip confirmation")
+    p.add_argument("--out-dir", default=None, help="PKI output directory (optional, for compatibility)")
     p.add_argument("--log-file", default=None)
     p = ca_sub.add_parser("gen-crl", help="Generate CRL for a CA")
     p.set_defaults(_parser=p, _run=cmd_ca_gen_crl)
-    p.add_argument("--ca-cert", required=True, help="CA cert PEM")
-    p.add_argument("--ca-key", required=True, help="CA encrypted key PEM")
+    p.add_argument("--ca", choices=["root", "intermediate"], help="CA type to generate CRL for")
+    p.add_argument("--ca-cert", help="CA cert PEM")
+    p.add_argument("--ca-key", help="CA encrypted key PEM")
     p.add_argument("--ca-pass-file", required=True, help="CA passphrase file")
     p.add_argument("--out-dir", default="./pki")
     p.add_argument("--out-file", default=None, help="Custom output file for CRL")
@@ -694,6 +718,7 @@ def main() -> None:
     p.set_defaults(_run=cmd_ca_check_revoked)
     p.add_argument("serial", help="Serial number of the certificate (hex)")
     p.add_argument("--db-path", default="./pki/micropki.db")
+    p.add_argument("--crl", help="Optional CRL PEM to check serial against")
     p.add_argument("--log-file", default=None)
     p = ca_sub.add_parser("compromise", help="Simulate private key compromise")
     p.set_defaults(_parser=p, _run=cmd_ca_compromise)
