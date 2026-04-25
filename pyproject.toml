@@ -25,3 +25,7 @@ dev = ["pytest>=7.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "perf: marks tests as performance tests (run with --run-perf)",
+]
+

@@ -277,8 +277,11 @@ def cmd_ca_revoke(args) -> int:
             if ans.lower() != 'y':
                 print("Aborted.")
                 return 0
-        revocation.revoke(args.db_path, args.serial, args.reason, log_file=args.log_file)
-        print(f"Revoked {args.serial}")
+        success = revocation.revoke(args.db_path, args.serial, args.reason, log_file=args.log_file)
+        if success:
+            print(f"Revoked {args.serial}")
+        else:
+            print(f"Certificate {args.serial} is already revoked.", file=sys.stderr)
         return 0
     except Exception as e:
         log.error("Revocation failed: %s", e)

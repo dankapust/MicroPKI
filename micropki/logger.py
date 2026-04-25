@@ -14,8 +14,6 @@ def setup_logging(log_file: str | None = None) -> logging.Logger:
     global _current_log_file
     root = logging.getLogger("micropki")
     root.setLevel(logging.DEBUG)
-    if _current_log_file == log_file and root.handlers:
-        return root
     for h in list(root.handlers):
         root.removeHandler(h)
         h.close()

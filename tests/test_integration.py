@@ -10,16 +10,27 @@ from cryptography.x509.oid import ExtendedKeyUsageOID
 
 
 def _run(*args):
-    result = subprocess.run(
-        [sys.executable, "-m", "micropki"] + list(args),
-        capture_output=True, text=True,
-        cwd=Path(__file__).resolve().parent.parent,
-    )
-    return result.returncode, result.stdout, result.stderr
+    import sys
+    from io import StringIO
+    from micropki.cli import main
+    stdout = StringIO()
+    stderr = StringIO()
+    old_stdout, old_stderr, old_argv = sys.stdout, sys.stderr, sys.argv
+    sys.stdout, sys.stderr, sys.argv = stdout, stderr, ["micropki"] + [str(a) for a in args]
+    try:
+        exit_code = main() or 0
+    except SystemExit as e:
+        exit_code = e.code if e.code is not None else 0
+    except Exception as e:
+        stderr.write(str(e))
+        exit_code = 1
+    finally:
+        sys.stdout, sys.stderr, sys.argv = old_stdout, old_stderr, old_argv
+    return exit_code, stdout.getvalue(), stderr.getvalue()
 
 
 @pytest.fixture(scope="module")
-def pki_dir(tmp_path_factory):
+def pki_dir(tmp_path_factory, run_cli):
     """Set up Root CA + Intermediate CA once for the module."""
     base = tmp_path_factory.mktemp("pki_s2")
     secrets = base / "secrets"
@@ -28,7 +39,7 @@ def pki_dir(tmp_path_factory):
     (secrets / "inter.pass").write_bytes(b"interpass")
     out = base / "pki"
 
-    code, _, err = _run(
+    code, _, err = run_cli(
         "ca", "init",
         "--subject", "/CN=Test Root CA",
         "--key-type", "rsa", "--key-size", "4096",
@@ -37,7 +48,7 @@ def pki_dir(tmp_path_factory):
     )
     assert code == 0, err
 
-    code, _, err = _run(
+    code, _, err = run_cli(
         "ca", "issue-intermediate",
         "--root-cert", str(out / "certs" / "ca.cert.pem"),
         "--root-key", str(out / "private" / "ca.key.pem"),

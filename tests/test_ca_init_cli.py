@@ -7,22 +7,15 @@ from pathlib import Path
 import pytest
 
 
-def _run_micropki(*args):
-    result = subprocess.run(
-        [sys.executable, "-m", "micropki"] + list(args),
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).resolve().parent.parent,
-    )
-    return result.returncode, result.stdout, result.stderr
+# Removed _run_micropki in favor of run_cli fixture
 
 
-def test_cli_ca_init_missing_subject():
+def test_cli_ca_init_missing_subject(run_cli):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
     try:
-        code, out, err = _run_micropki(
+        code, out, err = run_cli(
             "ca", "init",
             "--passphrase-file", pass_path,
             "--key-type", "rsa", "--key-size", "4096",
@@ -33,12 +26,12 @@ def test_cli_ca_init_missing_subject():
         Path(pass_path).unlink(missing_ok=True)
 
 
-def test_cli_ca_init_invalid_key_type_ecc_with_256():
+def test_cli_ca_init_invalid_key_type_ecc_with_256(run_cli):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
     try:
-        code, out, err = _run_micropki(
+        code, out, err = run_cli(
             "ca", "init",
             "--subject", "/CN=Test",
             "--key-type", "ecc", "--key-size", "256",
@@ -50,12 +43,12 @@ def test_cli_ca_init_invalid_key_type_ecc_with_256():
         Path(pass_path).unlink(missing_ok=True)
 
 
-def test_cli_ca_init_invalid_dn():
+def test_cli_ca_init_invalid_dn(run_cli):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
         f.write(b"pass")
         pass_path = f.name
     try:
-        code, _, err = _run_micropki(
+        code, _, err = run_cli(
             "ca", "init",
             "--subject", "CN=,O=Bad",
             "--key-type", "rsa", "--key-size", "4096",
@@ -67,8 +60,8 @@ def test_cli_ca_init_invalid_dn():
         Path(pass_path).unlink(missing_ok=True)
 
 
-def test_cli_ca_init_nonexistent_passphrase_file():
-    code, out, err = _run_micropki(
+def test_cli_ca_init_nonexistent_passphrase_file(run_cli):
+    code, out, err = run_cli(
         "ca", "init",
         "--subject", "/CN=Test",
         "--key-type", "rsa", "--key-size", "4096",
@@ -78,12 +71,12 @@ def test_cli_ca_init_nonexistent_passphrase_file():
     assert "passphrase" in err.lower() or "exist" in err.lower() or "read" in err.lower()
 
 
-def test_cli_ca_init_and_verify_self_signed(tmp_path):
+def test_cli_ca_init_and_verify_self_signed(tmp_path, run_cli):
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
 
-    code, _, err = _run_micropki(
+    code, _, err = run_cli(
         "ca", "init",
         "--subject", "/CN=Demo Root CA",
         "--key-type", "rsa", "--key-size", "4096",
@@ -97,16 +90,16 @@ def test_cli_ca_init_and_verify_self_signed(tmp_path):
     assert (out_dir / "private" / "ca.key.pem").exists()
     assert (out_dir / "policy.txt").exists()
 
-    code2, _, err2 = _run_micropki("ca", "verify", "--cert", str(cert_path))
+    code2, _, err2 = run_cli("ca", "verify", "--cert", str(cert_path))
     assert code2 == 0, err2
 
 
-def test_cli_ca_init_ecc(tmp_path):
+def test_cli_ca_init_ecc(tmp_path, run_cli):
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
 
-    code, _, err = _run_micropki(
+    code, _, err = run_cli(
         "ca", "init",
         "--subject", "CN=ECC Root CA,O=MicroPKI",
         "--key-type", "ecc", "--key-size", "384",
@@ -117,17 +110,17 @@ def test_cli_ca_init_ecc(tmp_path):
     cert_path = out_dir / "certs" / "ca.cert.pem"
     assert cert_path.exists()
 
-    code2, _, err2 = _run_micropki("ca", "verify", "--cert", str(cert_path))
+    code2, _, err2 = run_cli("ca", "verify", "--cert", str(cert_path))
     assert code2 == 0, err2
 
 
-def test_cli_ca_init_log_file(tmp_path):
+def test_cli_ca_init_log_file(tmp_path, run_cli):
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
     log_file = tmp_path / "logs" / "ca-init.log"
 
-    code, _, err = _run_micropki(
+    code, _, err = run_cli(
         "ca", "init",
         "--subject", "/CN=Log Test",
         "--key-type", "rsa", "--key-size", "4096",
@@ -148,24 +141,25 @@ def test_cli_ca_init_log_file(tmp_path):
     assert "secret" not in log_text
 
 
-def test_cli_ca_init_unwritable_outdir():
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pass") as f:
-        f.write(b"pass")
-        pass_path = f.name
-    try:
-        code, _, err = _run_micropki(
-            "ca", "init",
-            "--subject", "/CN=Test",
-            "--key-type", "rsa", "--key-size", "4096",
-            "--passphrase-file", pass_path,
-            "--out-dir", "Z:\\nonexistent\\impossible\\path",
-        )
-        assert code != 0
-    finally:
-        Path(pass_path).unlink(missing_ok=True)
+def test_cli_ca_init_unwritable_outdir(run_cli, tmp_path):
+    pass_path = tmp_path / "ca.pass"
+    pass_path.write_bytes(b"pass")
+    
+    # To ensure it's unwritable on Linux too, try to use a file where a directory should be
+    existing_file = tmp_path / "blocked"
+    existing_file.write_text("not a directory")
+    
+    code, _, err = run_cli(
+        "ca", "init",
+        "--subject", "/CN=Test",
+        "--key-type", "rsa", "--key-size", "4096",
+        "--passphrase-file", str(pass_path),
+        "--out-dir", str(existing_file),
+    )
+    assert code != 0
 
 
-def test_cli_ca_init_refuse_overwrite_without_force(tmp_path):
+def test_cli_ca_init_refuse_overwrite_without_force(tmp_path, run_cli):
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -174,7 +168,7 @@ def test_cli_ca_init_refuse_overwrite_without_force(tmp_path):
     (out_dir / "private" / "ca.key.pem").write_text("existing")
     (out_dir / "certs" / "ca.cert.pem").write_text("existing")
 
-    code, _, err = _run_micropki(
+    code, _, err = run_cli(
         "ca", "init",
         "--subject", "/CN=Test",
         "--key-type", "rsa", "--key-size", "4096",
@@ -185,7 +179,7 @@ def test_cli_ca_init_refuse_overwrite_without_force(tmp_path):
     assert "overwrite" in err.lower() or "exist" in err.lower()
 
 
-def test_cli_ca_init_with_force_overwrites(tmp_path):
+def test_cli_ca_init_with_force_overwrites(tmp_path, run_cli):
     pass_file = tmp_path / "ca.pass"
     pass_file.write_bytes(b"secret")
     out_dir = tmp_path / "pki"
@@ -194,7 +188,7 @@ def test_cli_ca_init_with_force_overwrites(tmp_path):
     (out_dir / "private" / "ca.key.pem").write_text("old")
     (out_dir / "certs" / "ca.cert.pem").write_text("old")
 
-    code, _, err = _run_micropki(
+    code, _, err = run_cli(
         "ca", "init", "--force",
         "--subject", "/CN=Test",
         "--key-type", "rsa", "--key-size", "4096",
@@ -203,3 +197,4 @@ def test_cli_ca_init_with_force_overwrites(tmp_path):
     )
     assert code == 0, err
     assert (out_dir / "private" / "ca.key.pem").read_bytes().startswith(b"-----BEGIN")
+
