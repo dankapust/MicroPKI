@@ -373,7 +373,7 @@ Issuer:  {issuer_dn}
 Serial:  {serial_hex}
 Valid:   {not_before} to {not_after}
 Key:     {key_algo}
-PathLen: {pathlen}
+Path Length Constraint: {pathlen}
 """
     with open(policy_path, "a", encoding="utf-8") as f:
         f.write(section)
