@@ -502,7 +502,7 @@ def cmd_ca_issue_ocsp_cert(args) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 def cmd_audit_query(args) -> int:
-        from . import audit as audit_module
+    from . import audit as audit_module
     import json as json_mod
 
     log_path = getattr(args, "log_file_path", "./pki/audit/audit.log")
@@ -538,7 +538,7 @@ def cmd_audit_query(args) -> int:
     return 0
 
 def cmd_audit_verify(args) -> int:
-        from . import audit as audit_module
+    from . import audit as audit_module
 
     log_path = getattr(args, "log_file_path", "./pki/audit/audit.log")
     chain_path = getattr(args, "chain_file", "./pki/audit/chain.dat")
@@ -549,6 +549,19 @@ def cmd_audit_verify(args) -> int:
         return 0
     else:
         print(f"INTEGRITY FAILURE: first corrupted entry at index {bad_idx}", file=sys.stderr)
+        return 1
+
+def cmd_demo_run(args) -> int:
+    try:
+        import runpy
+        demo_script = Path(__file__).parent.parent / "demo" / "demo.py"
+        if not demo_script.exists():
+            print(f"Error: demo script not found at {demo_script}", file=sys.stderr)
+            return 1
+        runpy.run_path(str(demo_script), run_name="__main__")
+        return 0
+    except Exception as e:
+        print(f"Demo failed: {e}", file=sys.stderr)
         return 1
 def main() -> None:
     parser = argparse.ArgumentParser(prog="micropki", description="MicroPKI - minimal PKI")
@@ -563,6 +576,11 @@ def main() -> None:
     ocsp_sub = ocsp_parser.add_subparsers(dest="ocsp_command")
     audit_parser = subparsers.add_parser("audit", help="Audit log operations")
     audit_sub = audit_parser.add_subparsers(dest="audit_command")
+    demo_parser = subparsers.add_parser("demo", help="Demo operations")
+    demo_sub = demo_parser.add_subparsers(dest="demo_command")
+
+    p_demo_run = demo_sub.add_parser("run", help="Run the full demo scenario")
+    p_demo_run.set_defaults(_run=cmd_demo_run)
 
     p_init = db_sub.add_parser("init", help="Initialise the certificate database")
     p_init.set_defaults(_parser=p_init, _run=cmd_db_init)
@@ -793,6 +811,13 @@ def main() -> None:
     elif args.command == "audit":
         if not getattr(args, "audit_command", None):
             audit_parser.print_help()
+            sys.exit(0)
+        run = getattr(args, "_run", None)
+        if run:
+            sys.exit(run(args))
+    elif args.command == "demo":
+        if not getattr(args, "demo_command", None):
+            demo_parser.print_help()
             sys.exit(0)
         run = getattr(args, "_run", None)
         if run:

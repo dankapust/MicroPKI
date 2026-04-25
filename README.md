@@ -1,476 +1,514 @@
 # MicroPKI
 
-Минимальная реализация инфраструктуры открытых ключей (PKI) для обучения и демонстрации. Поддерживает корневой УЦ, промежуточный УЦ, сертификаты конечных сущностей, отзыв (CRL), сервер репозитория и OCSP-ответчик.
+> Минимальная, но полнофункциональная реализация инфраструктуры открытых ключей (PKI) на Python — для обучения, демонстрации и лабораторных работ.
 
-## Зависимости
+[![CI](https://github.com/dankapust/MicroPKI/actions/workflows/ci.yml/badge.svg)](https://github.com/dankapust/MicroPKI/actions/workflows/ci.yml)
 
-- **Python** 3.8 и выше
+---
+
+## Возможности
+
+- **Корневой УЦ (Root CA)** — самоподписанный RSA-4096 или ECC P-384.
+- **Промежуточный УЦ (Intermediate CA)** — подписан корневым, с ограничением pathLen.
+- **Сертификаты конечных сущностей** — шаблоны: `server`, `client`, `code_signing`, `ocsp`.
+- **Генерация CSR** — клиент создаёт запрос на сертификат (PKCS#10).
+- **Сервер репозитория** — HTTP REST API для распространения сертификатов и CRL (FastAPI).
+- **Отзыв сертификатов и CRL** — с сохранением причины отзыва по RFC 5280.
+- **OCSP-ответчик** — HTTP сервер, отвечает по RFC 6960 (GET & POST).
+- **Валидация цепочки** — полная проверка по RFC 5280 (подпись, сроки, BasicConstraints, pathLength, KeyUsage).
+- **Проверка отзыва** — OCSP → CRL fallback, с извлечением AIA/CDP из сертификата.
+- **Политики безопасности** — минимальные размеры ключей, сроки, запрет wildcards, проверка алгоритмов.
+- **Аудит-логирование** — NDJSON с криптографической цепочкой хешей SHA-256.
+- **Certificate Transparency (симуляция)** — лог выпущенных сертификатов.
+- **Компрометация ключей** — блокировка, экстренный CRL.
+- **Rate limiting** — ограничение запросов по IP (token bucket).
+- **TLS-интеграция** — сертификаты пригодны для реальных TLS-соединений.
+- **Подпись кода** — выпуск code signing сертификатов, подпись и проверка файлов.
+
+---
+
+## Архитектура
+
+```mermaid
+graph TB
+    subgraph CLI ["CLI (cli.py)"]
+        CA_CMD["ca init / issue-intermediate / issue-cert / revoke / gen-crl / compromise"]
+        CLIENT_CMD["client gen-csr / request-cert / validate / check-status"]
+        AUDIT_CMD["audit query / verify"]
+    end
+
+    subgraph CA_CORE ["CA Core"]
+        CA["ca.py"]
+        CERTS["certificates.py"]
+        CSR["csr.py"]
+        SERIAL["serial.py"]
+        TEMPLATES["templates.py"]
+        CRYPTO["crypto_utils.py"]
+    end
+
+    subgraph SECURITY ["Безопасность"]
+        POLICY["policy.py"]
+        AUDIT["audit.py"]
+        CT["transparency.py"]
+        COMPROMISE["compromise.py"]
+        RATELIMIT["ratelimit.py"]
+    end
+
+    subgraph SERVERS ["Серверы"]
+        REPO["repo.py (FastAPI :8080)"]
+        OCSP_SRV["ocsp_responder.py (FastAPI :8081)"]
+    end
+
+    subgraph STORAGE ["Хранилище"]
+        DB[(SQLite: micropki.db)]
+        FS["Файловая система: certs/, private/, crl/"]
+        AUDIT_LOG["audit.log + chain.dat"]
+    end
+
+    subgraph VALIDATION ["Валидация"]
+        CHAIN["chain.py"]
+        VALID["validation.py"]
+        REVCHECK["revocation_check.py"]
+    end
+
+    CLI --> CA_CORE
+    CLI --> SERVERS
+    CLI --> VALIDATION
+    CLI --> SECURITY
+    CA_CORE --> STORAGE
+    CA_CORE --> SECURITY
+    SERVERS --> STORAGE
+    SERVERS --> CA_CORE
+    VALIDATION --> STORAGE
+    SECURITY --> STORAGE
+```
+
+---
+
+## Требования
+
+- **Python** 3.10+
 - **cryptography** ≥ 3.0
-- **fastapi** и **uvicorn** (для серверов репозитория и OCSP)
+- **fastapi** и **uvicorn** (для серверов)
+- **requests** (для клиентских команд)
+- **OpenSSL** (для демонстрации TLS и подписи кода)
 
-Полный список зависимостей — в `requirements.txt`.
+Полный список — в `requirements.txt`.
 
-## Сборка / Установка
+---
+
+## Установка
 
 ```bash
-# Создать виртуальное окружение (рекомендуется)
+# Клонировать репозиторий
+git clone https://github.com/dankapust/MicroPKI.git
+cd MicroPKI
+
+# Создать виртуальное окружение
 python -m venv venv
 # Windows:
 venv\Scripts\activate
-# Unix/macOS:
+# Linux/macOS:
 # source venv/bin/activate
 
 # Установить зависимости
 pip install -r requirements.txt
 
-# Установить пакет в режиме разработки
+# Установить пакет в dev-режиме
 pip install -e .
 ```
 
-## Запуск тестов
+---
+
+## CLI Reference
+
+### `micropki ca` — Операции удостоверяющего центра
+
+| Команда | Описание |
+|---------|----------|
+| `ca init` | Создание самоподписанного корневого УЦ |
+| `ca issue-intermediate` | Создание промежуточного УЦ |
+| `ca issue-cert` | Выпуск сертификата конечной сущности |
+| `ca issue-ocsp-cert` | Выпуск сертификата для OCSP-ответчика |
+| `ca verify` | Проверка самоподписанного сертификата |
+| `ca verify-chain` | Проверка цепочки сертификатов |
+| `ca list-certs` | Список сертификатов в БД |
+| `ca show-cert` | Показать PEM сертификата по серийному номеру |
+| `ca revoke` | Отзыв сертификата |
+| `ca gen-crl` | Генерация CRL |
+| `ca check-revoked` | Проверка статуса отзыва в БД |
+| `ca compromise` | Симуляция компрометации ключа |
+
+### `micropki client` — Клиентские инструменты
+
+| Команда | Описание |
+|---------|----------|
+| `client gen-csr` | Генерация ключа и CSR |
+| `client request-cert` | Отправка CSR через API и получение сертификата |
+| `client validate` | Валидация цепочки (chain / full с OCSP/CRL) |
+| `client check-status` | Проверка статуса отзыва (OCSP → CRL fallback) |
+
+### `micropki repo` — Сервер репозитория
+
+| Команда | Описание |
+|---------|----------|
+| `repo serve` | Запуск HTTP-сервера (порт 8080 по умолчанию) |
+
+### `micropki ocsp` — OCSP-ответчик
+
+| Команда | Описание |
+|---------|----------|
+| `ocsp serve` | Запуск OCSP-ответчика (порт 8081 по умолчанию) |
+
+### `micropki db` — Управление базой данных
+
+| Команда | Описание |
+|---------|----------|
+| `db init` | Инициализация SQLite базы данных |
+
+### `micropki audit` — Аудит
+
+| Команда | Описание |
+|---------|----------|
+| `audit query` | Запрос аудит-лога (фильтры: `--operation`, `--level`, `--from`, `--to`) |
+| `audit verify` | Проверка целостности аудит-лога |
+
+Для подробной справки по любой команде используйте `--help`:
 
 ```bash
-pytest tests/ -v
+micropki ca init --help
+micropki client validate --help
 ```
 
-Если вы установили только зависимости без `pip install -e .`, запускайте CLI так:
+---
 
-```bash
-python -m micropki ca init ...
-```
-
-## Быстрый старт (Windows PowerShell)
-
-Все команды выполняются из корневой папки проекта.
-
-**1. Установка зависимостей (если ещё не сделано):**
+## Быстрый старт
 
 ```powershell
-pip install -r requirements.txt
-pip install -e .
-```
-
-**2. Создание файлов с паролями:**
-
-```powershell
+# 1. Создать пароли
 mkdir secrets -Force
-Set-Content -Path secrets\ca.pass -Value "your-secret-passphrase" -NoNewline
+Set-Content -Path secrets\ca.pass -Value "root-passphrase" -NoNewline
 Set-Content -Path secrets\inter.pass -Value "intermediate-passphrase" -NoNewline
-```
 
-**3. Инициализация корневого УЦ:**
-
-```powershell
+# 2. Корневой УЦ
 micropki ca init --subject "/CN=Demo Root CA" --key-type rsa --key-size 4096 --passphrase-file secrets\ca.pass --out-dir .\pki
-```
 
-**4. Проверка сертификата корневого УЦ:**
+# 3. Промежуточный УЦ
+micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "/CN=Demo Intermediate CA" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
 
-```powershell
-micropki ca verify --cert pki\certs\ca.cert.pem
-```
-
-**5. Создание промежуточного УЦ:**
-
-```powershell
-micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "CN=MicroPKI Intermediate CA,O=MicroPKI" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
-```
-
-**6. Выпуск серверного сертификата:**
-
-```powershell
+# 4. Серверный сертификат
 micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template server --subject "/CN=example.com" --san dns:example.com --out-dir pki\certs
-```
 
-**7. Проверка цепочки доверия:**
-
-```powershell
+# 5. Проверка цепочки
 micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pki\certs\intermediate.cert.pem --root pki\certs\ca.cert.pem
 ```
 
-## Использование (Спринт 1) — Корневой УЦ
+---
 
-### Создание файла с паролем
+## Демонстрация (Demo)
 
-**Windows (PowerShell):**
-
-```powershell
-mkdir secrets -Force
-Set-Content -Path secrets\ca.pass -Value "your-secret-passphrase" -NoNewline
-```
-
-**Linux/macOS:**
+### Автоматический запуск
 
 ```bash
-mkdir -p secrets
-printf '%s' 'your-secret-passphrase' > secrets/ca.pass
+python demo/demo.py
 ```
 
-### Инициализация корневого УЦ (RSA 4096)
+Скрипт выполняет полный сценарий:
 
-```powershell
-micropki ca init --subject "/CN=Demo Root CA" --key-type rsa --key-size 4096 --passphrase-file secrets\ca.pass --out-dir .\pki
-```
+1. **Настройка окружения** — создание временных директорий и паролей.
+2. **Инициализация Root CA** — RSA-4096, самоподписанный.
+3. **Инициализация Intermediate CA** — подписан Root CA.
+4. **Выпуск сертификатов** — server, client, OCSP.
+5. **Запуск серверов** — репозиторий (порт 8080) и OCSP (порт 8081).
+6. **Валидация** — полная проверка цепочки с OCSP.
+7. **Отзыв** — серверный сертификат отзывается с причиной `keyCompromise`.
+8. **Проверка отзыва** — повторная валидация должна ПРОВАЛИТЬСЯ.
+9. **Целостность аудит-лога** — проверка хеш-цепочки.
+10. **Остановка серверов** — корректное завершение.
 
-### Инициализация корневого УЦ (ECC P-384)
+Каждый шаг выводит `[PASS]` или `[FAIL]`. Скрипт идемпотентен — при повторном запуске очищает предыдущие данные.
+
+---
+
+## TLS-интеграция
+
+### Демонстрация TLS-сервера
+
+После выпуска серверного сертификата (шаги из «Быстрый старт»):
 
 ```bash
-micropki ca init --subject "CN=ECC Root CA,O=MicroPKI" --key-type ecc --key-size 384 --passphrase-file secrets/ca.pass --out-dir ./pki
+# 1. Запустить простой HTTPS-сервер (Python)
+python -c "
+import ssl, http.server
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain('pki/certs/example.com.cert.pem', 'pki/certs/example.com.key.pem')
+server = http.server.HTTPServer(('127.0.0.1', 8443), http.server.SimpleHTTPRequestHandler)
+server.socket = ctx.wrap_socket(server.socket, server_side=True)
+print('HTTPS server running on https://127.0.0.1:8443')
+server.serve_forever()
+"
+
+# 2. В другом терминале — подключиться с доверием к Root CA
+curl --cacert pki/certs/ca.cert.pem https://127.0.0.1:8443 -k
+
+# Или через openssl:
+openssl s_client -connect 127.0.0.1:8443 -CAfile pki/certs/ca.cert.pem -verify 2
 ```
 
-### Проверка сертификата корневого УЦ
-
-```powershell
-micropki ca verify --cert pki\certs\ca.cert.pem
-```
-
-Проверка через OpenSSL:
+### Демонстрация отзыва через TLS
 
 ```bash
-openssl x509 -in pki/certs/ca.cert.pem -text -noout
-openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/ca.cert.pem
+# 1. Отозвать серверный сертификат
+micropki ca revoke <SERIAL_HEX> --reason keyCompromise --force
+
+# 2. Сгенерировать свежий CRL
+micropki ca gen-crl --ca-cert pki/certs/intermediate.cert.pem --ca-key pki/private/intermediate.key.pem --ca-pass-file secrets/inter.pass --out-dir pki
+
+# 3. Проверить с CRL — клиент должен отказать
+openssl verify -crl_check -CRLfile pki/crl/intermediate.crl.pem -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
+# Ожидаемый результат: certificate revoked
 ```
 
-## Использование (Спринт 2) — Промежуточный УЦ и сертификаты конечных сущностей
-
-### Создание промежуточного УЦ, подписанного корневым
-
-```powershell
-Set-Content -Path secrets\inter.pass -Value "intermediate-passphrase" -NoNewline
-micropki ca issue-intermediate --root-cert pki\certs\ca.cert.pem --root-key pki\private\ca.key.pem --root-pass-file secrets\ca.pass --subject "CN=MicroPKI Intermediate CA,O=MicroPKI" --key-type rsa --key-size 4096 --passphrase-file secrets\inter.pass --out-dir .\pki --validity-days 1825 --pathlen 0
-```
-
-### Выпуск серверного сертификата
-
-```powershell
-micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template server --subject "CN=example.com,O=MicroPKI" --san dns:example.com --san dns:www.example.com --san ip:192.168.1.10 --out-dir pki\certs --validity-days 365
-```
-
-### Выпуск клиентского сертификата
-
-```powershell
-micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template client --subject "CN=Alice Smith" --san email:alice@example.com --out-dir pki\certs
-```
-
-### Выпуск сертификата для подписи кода
-
-```powershell
-micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template code_signing --subject "CN=MicroPKI Code Signer" --out-dir pki\certs
-```
-
-### Проверка цепочки сертификатов (лист → промежуточный → корневой)
-
-```powershell
-micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pki\certs\intermediate.cert.pem --root pki\certs\ca.cert.pem
-```
-
-Совместимость с OpenSSL:
+### OCSP Stapling (симуляция)
 
 ```bash
-openssl verify -CAfile pki/certs/ca.cert.pem pki/certs/intermediate.cert.pem
-openssl verify -CAfile pki/certs/ca.cert.pem -untrusted pki/certs/intermediate.cert.pem pki/certs/example.com.cert.pem
+# openssl s_server с OCSP stapling
+openssl s_server -cert pki/certs/example.com.cert.pem -key pki/certs/example.com.key.pem -CAfile pki/certs/intermediate.cert.pem -status_url http://127.0.0.1:8081 -accept 8443
+
+# Клиент проверяет stapled OCSP
+openssl s_client -connect 127.0.0.1:8443 -status -CAfile pki/certs/ca.cert.pem
 ```
 
-## Использование (Спринт 3) — Сервер репозитория
+---
 
-### Инициализация базы данных сертификатов
+## Подпись кода (Code Signing)
+
+### 1. Выпуск сертификата для подписи кода
+
+```powershell
+micropki ca issue-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --template code_signing --subject "/CN=MicroPKI Code Signer" --out-dir pki\certs
+```
+
+### 2. Подпись файла
 
 ```bash
-micropki db init --db-path ./pki/micropki.db
+# Подписать скрипт (detached SHA-256 signature)
+openssl dgst -sha256 -sign pki/certs/MicroPKI_Code_Signer.key.pem -out script.sh.sig script.sh
 ```
 
-### Запуск HTTP-сервера репозитория
+### 3. Проверка подписи
 
 ```bash
-micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs
+# Извлечь публичный ключ из сертификата и проверить подпись
+openssl dgst -sha256 -verify <(openssl x509 -in pki/certs/MicroPKI_Code_Signer.cert.pem -pubkey -noout) -signature script.sh.sig script.sh
+# Ожидаемый результат: Verified OK
+
+# Проверка после изменения файла — должна ПРОВАЛИТЬСЯ
+echo "tampered" >> script.sh
+openssl dgst -sha256 -verify <(openssl x509 -in pki/certs/MicroPKI_Code_Signer.cert.pem -pubkey -noout) -signature script.sh.sig script.sh
+# Ожидаемый результат: Verification Failure
 ```
 
-### Примеры API-запросов (curl)
+### 4. Проверка отзыва (необязательно)
 
 ```bash
-# Получить сертификат по серийному номеру
-curl http://localhost:8080/certificate/2A7F... --output cert.pem
+# Отозвать code signing сертификат
+micropki ca revoke <CODE_SIGNER_SERIAL> --reason keyCompromise --force
 
-# Получить сертификат корневого УЦ
-curl http://localhost:8080/ca/root --output root.pem
-
-# Получить сертификат промежуточного УЦ
-curl http://localhost:8080/ca/intermediate --output intermediate.pem
-
-# Точка распространения CRL
-curl http://localhost:8080/crl?ca=intermediate --output intermediate.crl.pem
-openssl crl -inform PEM -in intermediate.crl.pem -text -noout
+# Проверить статус через OCSP
+micropki client check-status --cert pki/certs/MicroPKI_Code_Signer.cert.pem --ca-cert pki/certs/intermediate.cert.pem --ocsp-url http://127.0.0.1:8081
+# Ожидаемый результат: Status: revoked
 ```
 
-## Использование (Спринт 4) — Отзыв сертификатов и CRL
+---
 
-### Отзыв сертификата
+## API Reference (Repository Server)
+
+Сервер запускается командой `micropki repo serve`.
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `GET` | `/` | Статус сервера |
+| `GET` | `/certificate/{serial_hex}` | Получить сертификат по серийному номеру (PEM) |
+| `GET` | `/ca/root` | Получить сертификат Root CA |
+| `GET` | `/ca/intermediate` | Получить сертификат Intermediate CA |
+| `GET` | `/crl?ca=intermediate` | Получить CRL |
+| `POST` | `/request-cert` | Выпустить сертификат по CSR (JSON: `{csr_pem, template}`) |
+
+### Примеры
 
 ```bash
-micropki ca revoke <серийный_номер_hex> --reason keyCompromise --db-path ./pki/micropki.db
+# Статус
+curl http://localhost:8080/
+
+# Получить Root CA
+curl http://localhost:8080/ca/root -o root.pem
+
+# Получить CRL
+curl http://localhost:8080/crl?ca=intermediate -o intermediate.crl.pem
+
+# Выпустить сертификат через CSR
+curl -X POST http://localhost:8080/request-cert \
+  -H "Content-Type: application/json" \
+  -d '{"csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----", "template": "server"}'
 ```
 
-Поддерживаемые причины отзыва: `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`, `removeFromCRL`, `privilegeWithdrawn`, `aACompromise`.
+---
 
-### Генерация списка отозванных сертификатов (CRL)
+## Аудит и безопасность
+
+### Аудит-лог
+
+Все операции записываются в `./pki/audit/audit.log` (NDJSON) с SHA-256 хеш-цепочкой:
 
 ```bash
-micropki ca gen-crl --ca-cert pki/certs/intermediate.cert.pem --ca-key pki/private/intermediate.key.pem --ca-pass-file secrets/inter.pass --out-dir ./pki --db-path ./pki/micropki.db --next-update 7
-```
-
-## Использование (Спринт 5) — OCSP-ответчик
-
-### Выпуск сертификата для OCSP-ответчика
-
-OCSP-ответчику нужен собственный сертификат с расширенным использованием ключа `id-kp-OCSPSigning`. Закрытый ключ сохраняется **без шифрования**, чтобы ответчик мог загрузить его без пароля:
-
-```powershell
-micropki ca issue-ocsp-cert --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --subject "/CN=OCSP Responder" --san dns:localhost --out-dir pki\certs --validity-days 365
-```
-
-Результат:
-- `pki/certs/OCSP_Responder.cert.pem` — сертификат подписи OCSP
-- `pki/certs/OCSP_Responder.key.pem` — незашифрованный закрытый ключ
-
-### Запуск OCSP-ответчика
-
-```powershell
-micropki ocsp serve --host 127.0.0.1 --port 8081 --db-path ./pki/micropki.db --responder-cert ./pki/certs/OCSP_Responder.cert.pem --responder-key ./pki/certs/OCSP_Responder.key.pem --ca-cert ./pki/certs/intermediate.cert.pem
-```
-
-Сервер начинает слушать на `http://127.0.0.1:8081` и принимает GET и POST OCSP-запросы (RFC 6960).
-
-### Проверка статуса сертификата через OpenSSL
-
-Запрос статуса действующего сертификата:
-
-```powershell
-openssl ocsp -issuer pki\certs\intermediate.cert.pem -cert pki\certs\example.com.cert.pem -url http://127.0.0.1:8081 -VAfile pki\certs\OCSP_Responder.cert.pem
-```
-
-Ожидаемый вывод для действительного сертификата:
-
-```
-Response verify OK
-pki\certs\example.com.cert.pem: good
-    This Update: Apr  8 07:40:25 2026 GMT
-```
-
-### Отзыв и повторная проверка
-
-```powershell
-micropki ca revoke <серийный_номер_hex> --reason keyCompromise --force
-openssl ocsp -issuer pki\certs\intermediate.cert.pem -cert pki\certs\example.com.cert.pem -url http://127.0.0.1:8081 -VAfile pki\certs\OCSP_Responder.cert.pem
-```
-
-Ожидаемый вывод после отзыва:
-
-```
-Response verify OK
-pki\certs\example.com.cert.pem: revoked
-    This Update: Apr  8 07:47:17 2026 GMT
-    Reason: keyCompromise
-    Revocation Time: Apr  8 07:47:10 2026 GMT
-```
-
-## Использование (Спринт 6) — Клиентские инструменты и валидация
-
-### Генерация ключа и CSR
-
-Генерация закрытого ключа (RSA-2048) и запроса на подпись сертификата (PKCS#10):
-
-```powershell
-micropki client gen-csr --subject "/CN=app.example.com" --key-type rsa --key-size 2048 --san dns:app.example.com --san dns:api.example.com --out-key ./app.key.pem --out-csr ./app.csr.pem
-```
-
-### Запрос сертификата через API
-
-Запустите сервер репозитория с поддержкой подписания:
-
-```powershell
-micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass
-```
-
-Отправьте CSR:
-
-```powershell
-micropki client request-cert --csr ./app.csr.pem --template server --ca-url http://127.0.0.1:8080 --out-cert ./app.cert.pem
-```
-
-### Валидация цепочки сертификатов
-
-```powershell
-micropki client validate --cert ./app.cert.pem --untrusted pki\certs\intermediate.cert.pem --trusted pki\certs\ca.cert.pem --mode chain
-```
-
-Полная валидация с проверкой отзыва (OCSP + CRL):
-
-```powershell
-micropki client validate --cert ./app.cert.pem --untrusted pki\certs\intermediate.cert.pem --trusted pki\certs\ca.cert.pem --ocsp --ocsp-url http://127.0.0.1:8081 --mode full
-```
-
-### Проверка статуса отзыва (OCSP -> CRL fallback)
-
-```powershell
-micropki client check-status --cert ./app.cert.pem --ca-cert pki\certs\intermediate.cert.pem --ocsp-url http://127.0.0.1:8081
-```
-
-Логика: OCSP первым, при неудаче — CRL, оба недоступны — статус `unknown`.
-
-## Структура проекта
-
-```
-micropki/
-  __init__.py
-  __main__.py          # python -m micropki
-  cli.py               # парсер аргументов (ca, db, repo, ocsp, client)
-  ca.py                # корневой/промежуточный УЦ, выпуск сертификатов
-  certificates.py      # построение X.509, расширения, разбор DN
-  chain.py             # базовая валидация цепочки
-  client.py            # клиент: gen-csr, request-cert, validate, check-status
-  crl.py               # генерация CRL
-  crypto_utils.py      # PEM, ключи, шифрование, загрузка паролей
-  csr.py               # генерация CSR, подписание
-  database.py          # SQLite: certificates, crl_metadata
-  logger.py            # логирование (файл/stderr, ISO 8601)
-  ocsp.py              # OCSP-ответы (RFC 6960)
-  ocsp_responder.py    # HTTP-сервер OCSP (FastAPI)
-  repo.py              # HTTP-репозиторий + POST /request-cert
-  repository.py        # CRUD сертификатов в БД
-  revocation.py        # внутренний отзыв сертификатов
-  revocation_check.py  # клиентская проверка: OCSP, CRL, fallback, AIA/CDP
-  serial.py            # серийные номера
-  templates.py         # шаблоны (server, client, code_signing, ocsp)
-  validation.py        # валидация цепочки по RFC 5280
-  audit.py             # аудит-логирование (NDJSON + SHA-256 hash chain)
-  policy.py            # политики безопасности (ключи, сроки, SAN, алгоритмы)
-  ratelimit.py         # ограничение запросов (token bucket per IP)
-  transparency.py      # симуляция Certificate Transparency (CT) лога
-  compromise.py        # компрометация ключей (блокировка, экстренный CRL)
-tests/                 # pytest
-scripts/               # verify_key_cert_match.py
-requirements.txt
-pyproject.toml
-```
-
-## Использование (Спринт 7) — Безопасность и аудит
-
-### Система аудита
-
-Все критические операции записываются в NDJSON-файл `./pki/audit/audit.log` с криптографической цепочкой хешей SHA-256. Каждая запись содержит:
-
-- `timestamp` — время в ISO 8601 с микросекундами
-- `level` — уровень (AUDIT, INFO, ERROR)
-- `operation` — тип операции (ca_init, issue_certificate, revoke_certificate и т.д.)
-- `status` — результат (started, success, failure)
-- `message` — описание
-- `metadata` — детали (serial, subject, template, reason)
-- `integrity` — хеш-цепочка (`prev_hash`, `hash`)
-
-**Запрос аудит-лога:**
-
-```powershell
-# Все записи
-micropki audit query
-
-# Фильтрация по операции и формат JSON
 micropki audit query --operation issue_certificate --format json
-
-# Фильтрация по уровню
-micropki audit query --level AUDIT --format table
-
-# С проверкой целостности
-micropki audit query --verify
-```
-
-**Проверка целостности аудит-лога:**
-
-```powershell
 micropki audit verify
-# Вывод: "Audit log integrity: OK" или "INTEGRITY FAILURE: ..."
 ```
 
 ### Политики безопасности
 
-Все политики проверяются автоматически при выпуске сертификатов:
-
 | Политика | Правило |
 |----------|---------|
-| Размер RSA-ключа (Root) | ≥ 4096 бит |
-| Размер RSA-ключа (Intermediate) | ≥ 3072 бит |
-| Размер RSA-ключа (End-entity) | ≥ 2048 бит |
-| ECC-ключ (Root/Intermediate) | P-384 |
-| ECC-ключ (End-entity) | P-256 или P-384 |
-| Срок действия Root CA | ≤ 3650 дней |
-| Срок действия Intermediate CA | ≤ 1825 дней |
-| Срок действия конечного сертификата | ≤ 365 дней |
-| Wildcard SAN (*.example.com) | Запрещён по умолчанию |
-| SAN-типы для server | Только dns, ip |
-| SAN-типы для client | dns, email |
-| SAN-типы для code_signing | dns, uri |
-| Path length (Intermediate) | Должен быть 0 |
-| Алгоритм подписи | SHA-256+ (SHA-1 запрещён) |
+| RSA Root | ≥ 4096 бит |
+| RSA Intermediate | ≥ 3072 бит |
+| RSA End-entity | ≥ 2048 бит |
+| ECC Root/Intermediate | P-384 |
+| ECC End-entity | P-256 или P-384 |
+| Срок Root | ≤ 3650 дней |
+| Срок Intermediate | ≤ 1825 дней |
+| Срок End-entity | ≤ 365 дней |
+| Wildcard SAN | Запрещён |
+| SHA-1 | Запрещён |
 
-При нарушении политики выпуск блокируется, создаётся запись AUDIT.
+### Rate Limiting
 
-### Ограничение запросов (Rate Limiting)
-
-Серверы репозитория и OCSP поддерживают rate limiting по IP:
-
-```powershell
-# Репозиторий с ограничением 5 запросов/сек, burst 10
-micropki repo serve --host 127.0.0.1 --port 8080 --rate-limit 5 --rate-burst 10
-
-# OCSP-ответчик с ограничением
-micropki ocsp serve --responder-cert ... --responder-key ... --ca-cert ... --rate-limit 10 --rate-burst 20
+```bash
+micropki repo serve --rate-limit 5 --rate-burst 10
+micropki ocsp serve --rate-limit 10 --rate-burst 20
 ```
 
-При превышении лимита сервер возвращает HTTP 429 с заголовком `Retry-After`.
+---
 
-### Симуляция Certificate Transparency (CT)
+## Замечания по безопасности (Security Considerations)
 
-Каждый выпущенный сертификат записывается в `./pki/audit/ct.log`. Формат строки:
+> ⚠️ **Данная система предназначена для образовательных целей и НЕ рекомендуется для использования в production без дополнительного усиления.**
+
+1. **Закрытые ключи конечных сущностей хранятся без шифрования.** Это сделано для удобства демонстрации. В production ключи должны храниться в HSM или с паролем.
+
+2. **Пароли Root/Intermediate CA читаются из файлов.** Файлы паролей должны иметь права `0600` и находиться вне репозитория. В production используйте секретные менеджеры (Vault, AWS KMS).
+
+3. **OCSP-ответчик не использует HTTPS.** Нет защиты транспортного уровня. В production OCSP-ответчик должен быть за reverse proxy с TLS.
+
+4. **Rate limiting базовый.** Token bucket per IP не защитит от распределённых атак. В production используйте CDN/WAF.
+
+5. **Целостность аудит-лога основана на хеш-цепочке.** Файл не подписан и может быть удалён. В production используйте append-only хранилища (WORM) или блокчейн.
+
+6. **Certificate Transparency — симуляция.** Нет дерева Меркла, публичного лога, или gossip-протокола. Используется простой текстовый лог.
+
+7. **Нет аутентификации на API `/request-cert`.** Любой может запросить сертификат. В production требуется mTLS, OAuth или API-ключи.
+
+---
+
+## Тестирование
+
+### Запуск тестов
+
+```bash
+# Все тесты
+pytest tests/ -v
+
+# С покрытием кода
+pytest tests/ -v --cov=micropki --cov-report=term-missing
+
+# Performance-тесты (1000 сертификатов)
+pytest tests/test_performance.py -v --run-perf -s
+
+# HTML-отчёт о покрытии
+pytest tests/ --cov=micropki --cov-report=html
+# Открыть htmlcov/index.html
 ```
-timestamp | serial_hex | subject_dn | sha256_fingerprint | issuer_dn
+
+### Структура тестов
+
+| Файл | Описание |
+|------|----------|
+| `test_ca_init_cli.py` | CLI и инициализация Root CA |
+| `test_certificates.py` | Построение X.509 |
+| `test_chain.py` | Валидация цепочки |
+| `test_crl.py` | Генерация CRL |
+| `test_crypto_utils.py` | Криптографические утилиты |
+| `test_database.py` | SQLite операции |
+| `test_integration.py` | Интеграционные тесты |
+| `test_ocsp.py` | OCSP-ответчик |
+| `test_repository.py` | Репозиторий |
+| `test_security_hardening.py` | Политики, аудит, CT |
+| `test_templates.py` | Шаблоны сертификатов |
+| `test_validation.py` | Валидация пути |
+| `test_edge_cases.py` | Крайние случаи: expired, wrong EKU, malformed input |
+| `test_performance.py` | 1000 сертификатов, производительность |
+
+### Требования к покрытию
+
+Целевое покрытие: **≥ 80%** line coverage. Проверяется в CI.
+
+---
+
+## Структура проекта
+
+```
+MicroPKI/
+├── micropki/
+│   ├── __init__.py
+│   ├── __main__.py          # python -m micropki
+│   ├── cli.py               # CLI парсер
+│   ├── ca.py                # Root CA, Intermediate CA, выпуск сертификатов
+│   ├── certificates.py      # X.509 builder, parse DN
+│   ├── chain.py             # Валидация цепочки
+│   ├── client.py            # gen-csr, request-cert, validate, check-status
+│   ├── compromise.py        # Компрометация ключей
+│   ├── crl.py               # Генерация CRL
+│   ├── crypto_utils.py      # PEM, ключи, подписи
+│   ├── csr.py               # CSR генерация и подписание
+│   ├── database.py          # SQLite: certificates, crl_metadata, compromised_keys
+│   ├── logger.py            # Логирование
+│   ├── ocsp.py              # OCSP-ответы (RFC 6960)
+│   ├── ocsp_responder.py    # OCSP HTTP-сервер (FastAPI)
+│   ├── policy.py            # Политики безопасности
+│   ├── ratelimit.py         # Rate limiting (token bucket)
+│   ├── repo.py              # Repository HTTP-сервер (FastAPI)
+│   ├── repository.py        # CRUD сертификатов в БД
+│   ├── revocation.py        # Внутренний отзыв
+│   ├── revocation_check.py  # OCSP/CRL fallback, AIA/CDP extraction
+│   ├── serial.py            # Серийные номера
+│   ├── templates.py         # server, client, code_signing, ocsp шаблоны
+│   ├── transparency.py      # Certificate Transparency (симуляция)
+│   └── validation.py        # RFC 5280 path validation
+├── tests/                   # pytest test suite
+├── demo/
+│   └── demo.py              # Автоматический демо-скрипт
+├── .github/workflows/
+│   └── ci.yml               # GitHub Actions CI
+├── requirements.txt
+├── pyproject.toml
+├── Makefile
+├── LICENSE                  # MIT
+└── README.md                # Этот файл
 ```
 
-Проверка включения сертификата в CT-лог — поиск серийного номера:
-```powershell
-Select-String -Path .\pki\audit\ct.log -Pattern "SERIAL_HEX"
-```
+---
 
-### Симуляция компрометации ключа
+## Ссылки и благодарности
 
-```powershell
-# Пометить ключ сертификата как скомпрометированный
-micropki ca compromise --cert pki\certs\example.com.cert.pem --force --db-path pki\micropki.db
+- [RFC 5280 — Internet X.509 PKI Certificate and CRL Profile](https://www.rfc-editor.org/rfc/rfc5280)
+- [RFC 6960 — Online Certificate Status Protocol (OCSP)](https://www.rfc-editor.org/rfc/rfc6960)
+- [RFC 6962 — Certificate Transparency](https://www.rfc-editor.org/rfc/rfc6962)
+- [Python cryptography library](https://cryptography.io/)
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [OpenSSL](https://www.openssl.org/)
 
-# С генерацией экстренного CRL
-micropki ca compromise --cert pki\certs\example.com.cert.pem --force --db-path pki\micropki.db --ca-cert pki\certs\intermediate.cert.pem --ca-key pki\private\intermediate.key.pem --ca-pass-file secrets\inter.pass --out-dir pki
-```
-
-После компрометации:
-- Сертификат отзывается с причиной `keyCompromise`
-- Хеш публичного ключа записывается в таблицу `compromised_keys`
-- Любой будущий CSR с тем же ключом будет отклонён
-- Создаётся запись AUDIT высокой важности
-- Опционально генерируется экстренный CRL
-
-### Расширение БД
-
-Таблица `compromised_keys` создаётся автоматически при `db init`:
-
-```sql
-CREATE TABLE IF NOT EXISTS compromised_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    public_key_hash TEXT UNIQUE NOT NULL,
-    certificate_serial TEXT NOT NULL,
-    compromise_date TEXT NOT NULL,
-    compromise_reason TEXT NOT NULL
-);
-```
+---
 
 ## Лицензия
 
-Для образовательных целей и демонстрации.
-
+MIT License. См. файл [LICENSE](LICENSE).

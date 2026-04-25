@@ -5,7 +5,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 
 class PolicyViolationError(ValueError):
-    
+    pass
+
 _RSA_MIN = {
     "root": 4096,
     "intermediate": 3072,
@@ -20,7 +21,7 @@ _ECC_MIN_BITS = {
 
 
 def check_key_size(key_type: str, key_size: int, role: str) -> None:
-        role = role.lower()
+    role = role.lower()
     key_type = key_type.lower()
 
     if key_type == "rsa":
@@ -44,7 +45,7 @@ def check_key_size(key_type: str, key_size: int, role: str) -> None:
 
 
 def check_public_key_size(public_key, role: str) -> None:
-        if isinstance(public_key, (rsa.RSAPublicKey, rsa.RSAPrivateKey)):
+    if isinstance(public_key, (rsa.RSAPublicKey, rsa.RSAPrivateKey)):
         pk = public_key if isinstance(public_key, rsa.RSAPublicKey) else public_key.public_key()
         check_key_size("rsa", pk.key_size, role)
     elif isinstance(public_key, (ec.EllipticCurvePublicKey, ec.EllipticCurvePrivateKey)):
@@ -61,7 +62,7 @@ _MAX_VALIDITY_DAYS = {
 
 
 def check_validity_period(days: int, role: str) -> None:
-        role = role.lower()
+    role = role.lower()
     maximum = _MAX_VALIDITY_DAYS.get(role)
     if maximum is None:
         raise PolicyViolationError(f"Unknown role: {role}")
@@ -71,7 +72,7 @@ def check_validity_period(days: int, role: str) -> None:
         )
 
 def check_san_policy(template: str, san_names: list[x509.GeneralName], allow_wildcards: bool = False) -> None:
-        _ALLOWED_SAN_TYPES = {
+    _ALLOWED_SAN_TYPES = {
         "server": {"dns", "ip"},
         "client": {"dns", "email"},
         "code_signing": {"dns", "uri"},
@@ -107,7 +108,7 @@ def check_san_policy(template: str, san_names: list[x509.GeneralName], allow_wil
                 )
 
 def check_algorithm(key_type: str, hash_name: str | None) -> None:
-        if hash_name is None:
+    if hash_name is None:
         return
     hash_name = hash_name.upper()
     if "SHA1" in hash_name or hash_name == "SHA-1":
@@ -121,7 +122,7 @@ def check_algorithm(key_type: str, hash_name: str | None) -> None:
 
 
 def check_csr_algorithm(csr: x509.CertificateSigningRequest) -> None:
-        hash_algo = csr.signature_hash_algorithm
+    hash_algo = csr.signature_hash_algorithm
     if hash_algo is not None:
         name = hash_algo.name.upper()
         if "SHA1" in name:
@@ -130,12 +131,12 @@ def check_csr_algorithm(csr: x509.CertificateSigningRequest) -> None:
             )
 
 def check_path_length(pathlen: int, role: str = "intermediate") -> None:
-        if role.lower() == "intermediate" and pathlen > 0:
+    if role.lower() == "intermediate" and pathlen > 0:
         raise PolicyViolationError(
             f"Intermediate CA path length must be 0 (got {pathlen}). "
             f"Use --allow-subordinate to override (not implemented)."
         )
 
 def check_csr_key_size(csr: x509.CertificateSigningRequest, role: str = "end_entity") -> None:
-        pub = csr.public_key()
+    pub = csr.public_key()
     check_public_key_size(pub, role)

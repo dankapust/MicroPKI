@@ -15,7 +15,7 @@ from .revocation import revoke
 
 
 def _public_key_hash(public_key) -> str:
-        der = public_key.public_bytes(
+    der = public_key.public_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
@@ -23,7 +23,7 @@ def _public_key_hash(public_key) -> str:
 
 
 def public_key_hash_from_cert(cert: x509.Certificate) -> str:
-        return _public_key_hash(cert.public_key())
+    return _public_key_hash(cert.public_key())
 
 
 def mark_compromised(
@@ -36,7 +36,7 @@ def mark_compromised(
     ca_pass_file: str | None = None,
     out_dir: str | None = None,
 ) -> dict:
-        audit = get_audit_logger(audit_dir)
+    audit = get_audit_logger(audit_dir)
     cert = crypto_utils.load_certificate_pem(str(cert_path))
     serial_hex = f"{cert.serial_number:X}"
     pk_hash = public_key_hash_from_cert(cert)
@@ -94,5 +94,5 @@ def mark_compromised(
 
 
 def is_key_compromised(db_path: str | Path, public_key) -> bool:
-        pk_hash = _public_key_hash(public_key)
+    pk_hash = _public_key_hash(public_key)
     return database.is_key_hash_compromised(db_path, pk_hash)

@@ -24,7 +24,6 @@ secrets/
 .coverage
 htmlcov/
 .mypy_cache/
-.DS_Store
 *.swp
 *.swo
 *.tmp
@@ -37,3 +36,9 @@ htmlcov/
 # MicroPKI artifacts
 chain.dat
 policy.txt
+pki/
+downloaded.crl
+
+# Demo artifacts
+demo_pki/
+demo_secrets/

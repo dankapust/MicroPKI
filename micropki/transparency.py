@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import serialization
 
 
 def _fingerprint(cert: x509.Certificate) -> str:
-        der = cert.public_bytes(serialization.Encoding.DER)
+    der = cert.public_bytes(serialization.Encoding.DER)
     return hashlib.sha256(der).hexdigest()
 
 
@@ -17,7 +17,7 @@ def log_certificate(
     cert: x509.Certificate,
     audit_dir: str | Path = "./pki/audit",
 ) -> None:
-        audit_dir = Path(audit_dir)
+    audit_dir = Path(audit_dir)
     audit_dir.mkdir(parents=True, exist_ok=True)
     ct_path = audit_dir / "ct.log"
 
@@ -41,7 +41,7 @@ def verify_inclusion(
     serial_hex: str,
     ct_log_path: str | Path = "./pki/audit/ct.log",
 ) -> bool:
-        ct_log_path = Path(ct_log_path)
+    ct_log_path = Path(ct_log_path)
     if not ct_log_path.is_file():
         return False
 

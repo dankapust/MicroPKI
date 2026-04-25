@@ -22,7 +22,7 @@ class AuditLogger:
         self._prev_hash = self._load_last_hash()
 
     def _load_last_hash(self) -> str:
-                if self.chain_path.is_file():
+        if self.chain_path.is_file():
             text = self.chain_path.read_text(encoding="utf-8").strip()
             lines = text.splitlines()
             if lines:
@@ -30,7 +30,7 @@ class AuditLogger:
         return _ZERO_HASH
 
     def _compute_hash(self, entry: dict) -> str:
-                entry_copy = json.loads(json.dumps(entry, sort_keys=True, ensure_ascii=False))
+        entry_copy = json.loads(json.dumps(entry, sort_keys=True, ensure_ascii=False))
         if "integrity" in entry_copy:
             entry_copy["integrity"].pop("hash", None)
         canonical = json.dumps(entry_copy, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -44,7 +44,7 @@ class AuditLogger:
         metadata: dict | None = None,
         level: str = "AUDIT",
     ) -> dict:
-                with self._lock:
+        with self._lock:
             now = datetime.now(timezone.utc)
             entry = {
                 "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond:06d}Z",
@@ -76,7 +76,7 @@ def verify_log(
     log_path: str | Path = "./pki/audit/audit.log",
     chain_path: str | Path = "./pki/audit/chain.dat",
 ) -> tuple[bool, int | None]:
-        log_path = Path(log_path)
+    log_path = Path(log_path)
     chain_path = Path(chain_path)
 
     if not log_path.is_file():
@@ -139,7 +139,7 @@ def query_log(
     operation: str | None = None,
     serial: str | None = None,
 ) -> list[dict]:
-        log_path = Path(log_path)
+    log_path = Path(log_path)
     if not log_path.is_file():
         return []
 
@@ -180,7 +180,7 @@ _default_lock = threading.Lock()
 
 
 def get_audit_logger(audit_dir: str | Path = "./pki/audit") -> AuditLogger:
-        global _default_logger
+    global _default_logger
     with _default_lock:
         if _default_logger is None or str(_default_logger.audit_dir) != str(Path(audit_dir)):
             _default_logger = AuditLogger(audit_dir)
@@ -188,6 +188,6 @@ def get_audit_logger(audit_dir: str | Path = "./pki/audit") -> AuditLogger:
 
 
 def reset_audit_logger() -> None:
-        global _default_logger
+    global _default_logger
     with _default_lock:
         _default_logger = None

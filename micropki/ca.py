@@ -24,7 +24,7 @@ from . import compromise as compromise_module
 
 
 def _audit_dir_from_out(out_dir: str) -> str:
-        out = Path(out_dir)
+    out = Path(out_dir)
     return str(out / "audit")
 
 
@@ -354,9 +354,28 @@ def _safe_filename(name: str) -> str:
     return safe or "cert"
 def _build_root_policy(subject, serial_hex, not_before, not_after, key_algo) -> str:
     created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return fdef _append_intermediate_policy(policy_path, subject, serial_hex,
+    return f"""MicroPKI Root CA Policy
+-----------------------
+Subject: {subject}
+Serial:  {serial_hex}
+Created: {created}
+Valid:   {not_before} to {not_after}
+Key:     {key_algo}
+"""
+
+def _append_intermediate_policy(policy_path, subject, serial_hex,
                                 not_before, not_after, key_algo, pathlen, issuer_dn) -> None:
-    section = f    with open(policy_path, "a", encoding="utf-8") as f:
+    section = f"""
+Intermediate CA Policy
+----------------------
+Subject: {subject}
+Issuer:  {issuer_dn}
+Serial:  {serial_hex}
+Valid:   {not_before} to {not_after}
+Key:     {key_algo}
+PathLen: {pathlen}
+"""
+    with open(policy_path, "a", encoding="utf-8") as f:
         f.write(section)
 def _insert_cert_record(db_path: str, cert) -> None:
     repository.insert_certificate(

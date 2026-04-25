@@ -65,7 +65,7 @@ class RateLimiter:
 
 
 def create_rate_limit_middleware(rate: float, burst: int = 10) -> Callable:
-        limiter = RateLimiter(rate, burst)
+    limiter = RateLimiter(rate, burst)
 
     async def rate_limit_middleware(request: Request, call_next) -> Response:
         client_ip = request.client.host if request.client else "unknown"
