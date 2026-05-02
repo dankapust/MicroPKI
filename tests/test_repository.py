@@ -134,3 +134,96 @@ def test_repository_endpoints(repo_env):
 
     server.shutdown()
     server.server_close()
+
+
+def test_repo_module_init(tmp_path):
+    """Cover repo.py initialization."""
+    from micropki import repo
+    db = tmp_path / "test.db"
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    repo.init_server(db_path=str(db), cert_dir=str(certs))
+    assert repo.app is not None
+
+
+def test_repo_app_endpoints(tmp_path):
+    """Cover repo.py endpoints via TestClient."""
+    from fastapi.testclient import TestClient
+    from micropki import repo
+    import json
+    from unittest.mock import MagicMock, patch
+    
+    db = tmp_path / "test.db"
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    
+    # Initialize database
+    from micropki import database
+    # Force fresh init
+    if db.exists(): db.unlink()
+    database.init_database(str(db))
+    
+    # Create dummy cert files for /ca/* endpoints
+    (certs / "ca.cert.pem").write_text("root cert")
+    (certs / "intermediate.cert.pem").write_text("inter cert")
+    
+    # Setup CA config for repo
+    repo.CA_CONFIG["ca_cert_path"] = str(tmp_path / "ca.crt")
+    repo.CA_CONFIG["ca_key_path"] = str(tmp_path / "ca.key")
+    repo.CA_CONFIG["ca_passphrase"] = "dummy"
+    Path(repo.CA_CONFIG["ca_cert_path"]).write_text("ca cert")
+    Path(repo.CA_CONFIG["ca_key_path"]).write_text("ca key")
+    
+    repo.init_server(db_path=str(db), cert_dir=str(certs))
+    
+    with TestClient(repo.app) as client:
+        # Basic endpoints
+        client.get("/crl")
+        client.get("/ca/root")
+        client.get("/ca/intermediate")
+        client.get("/certificates")
+        
+        # Success request-cert mock
+        with patch("micropki.ca.issue_end_entity") as mock_issue:
+            mock_issue.return_value = "FAKE_CERT_PEM"
+            res = client.post("/request-cert", json={
+                "csr_pem": "test",
+                "template": "client",
+                "validity_days": 365
+            })
+            assert res.status_code == 201
+            assert res.text == "FAKE_CERT_PEM"
+
+        # Failure request-cert mock (ValueError)
+        with patch("micropki.ca.issue_end_entity", side_effect=ValueError("Bad template")):
+            res = client.post("/request-cert", json={
+                "csr_pem": "test",
+                "template": "client"
+            })
+            assert res.status_code == 400
+            
+        # Exception request-cert mock
+        with patch("micropki.ca.issue_end_entity", side_effect=Exception("Crash")):
+            res = client.post("/request-cert", json={
+                "csr_pem": "test",
+                "template": "client"
+            })
+            assert res.status_code == 500
+
+        # Success fetch cert (was download)
+        with patch("micropki.repo.get_certificate_by_serial", return_value={"cert_pem": "PEMTXT", "status": "valid"}):
+            res = client.get("/certificate/123")
+            assert res.status_code == 200
+            assert "PEMTXT" in res.text
+            
+        # Error in fetch cert
+        with patch("micropki.repo.get_certificate_by_serial", side_effect=Exception("DB Error")):
+            res = client.get("/certificate/123")
+            assert res.status_code == 500
+
+        # Certificate not found (404)
+        with patch("micropki.repo.get_certificate_by_serial", return_value=None):
+            assert client.get("/certificate/ABCD").status_code == 404
+
+        # Missing CRL level
+        assert client.get("/crl?ca=invalid").status_code == 400

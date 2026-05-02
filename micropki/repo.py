@@ -78,7 +78,9 @@ async def get_certificate(serial_hex: str):
     serial_hex = serial_hex.upper()
     try:
         serial_number = int(serial_hex, 16)
-        cert_data = get_certificate_by_serial(serial_number)
+        cert_data = get_certificate_by_serial(serial_number, db_path=CA_CONFIG["db_path"])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid serial number format. Must be hex.")
     except Exception as e:
         if logger: logger.error("Database error in /certificate: %s", e)
         raise HTTPException(status_code=500, detail="Internal server error")

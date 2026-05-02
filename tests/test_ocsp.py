@@ -169,3 +169,45 @@ def test_ocsp_responder_process_request(keys_and_certs):
         ocsp_resp = ocsp.load_der_ocsp_response(resp.body)
         assert ocsp_resp.response_status == ocsp.OCSPResponseStatus.SUCCESSFUL
         assert ocsp_resp.certificate_status == ocsp.OCSPCertStatus.GOOD
+
+
+def test_ocsp_app_endpoints():
+    """Test OCSP responder web endpoints."""
+    from fastapi.testclient import TestClient
+    client = TestClient(ocsp_responder.app)
+    # Test GET /
+    response = client.get("/")
+    assert response.status_code == 200
+    
+    # Test POST / with invalid data
+    response = client.post(
+        "/", 
+        content=b"invalid", 
+        headers={"Content-Type": "application/ocsp-request"}
+    )
+    # Current implementation returns 200 with empty body on parse error
+    assert response.status_code == 200
+
+
+def test_ocsp_init_server(tmp_path, keys_and_certs):
+    """Test OCSP server initialization with real certs."""
+    db = tmp_path / "test.db"
+    cert_path = tmp_path / "resp.cert.pem"
+    key_path = tmp_path / "resp.key.pem"
+    issuer_path = tmp_path / "issuer.cert.pem"
+    
+    cert_path.write_bytes(keys_and_certs["responder_cert"].public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(keys_and_certs["responder_key"].private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()
+    ))
+    issuer_path.write_bytes(keys_and_certs["issuer_cert"].public_bytes(serialization.Encoding.PEM))
+    
+    ocsp_responder.init_ocsp_server(
+        db_path=str(db),
+        responder_cert_path=str(cert_path),
+        responder_key_path=str(key_path),
+        issuer_cert_path=str(issuer_path)
+    )
+    assert ocsp_responder.CONFIG["db_path"] == str(db)

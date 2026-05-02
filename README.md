@@ -105,11 +105,11 @@ git clone https://github.com/dankapust/MicroPKI.git
 cd MicroPKI
 
 # Создать виртуальное окружение
-python -m venv venv
-# Windows:
-venv\Scripts\activate
 # Linux/macOS:
-# source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
+# Windows (рекомендуется лаунчер py):
+# py -m venv venv
+# .\venv\Scripts\Activate.ps1
 
 # Установить зависимости
 pip install -r requirements.txt
@@ -117,6 +117,12 @@ pip install -r requirements.txt
 # Установить пакет в dev-режиме
 pip install -e .
 ```
+
+---
+
+## Конфигурация
+
+Отдельного файла конфигурации приложения нет: пути к БД, каталогам, парольным файлам и параметры выпуска задаются флагами CLI (см. `--help` у каждой команды). Правила политики (минимальные размеры ключей, сроки, ограничения SAN) реализованы в коде (`micropki/policy.py`).
 
 ---
 
@@ -173,6 +179,12 @@ pip install -e .
 | `audit query` | Запрос аудит-лога (фильтры: `--operation`, `--level`, `--from`, `--to`) |
 | `audit verify` | Проверка целостности аудит-лога |
 
+### `micropki demo`
+
+| Команда | Описание |
+|---------|----------|
+| `demo run` | Полный автоматический сценарий (см. раздел «Демонстрация») |
+
 Для подробной справки по любой команде используйте `--help`:
 
 ```bash
@@ -209,24 +221,40 @@ micropki ca verify-chain --leaf pki\certs\example.com.cert.pem --intermediate pk
 
 ### Автоматический запуск
 
+Запускайте из корня репозитория (где установлен пакет `micropki`), чтобы модуль находился через `pip install -e .`.
+
 ```bash
-python demo/demo.py
+# Linux/macOS
+python3 demo/demo.py
+
+# Windows (лаунчер py)
+py demo/demo.py
 ```
+
+Эквивалент через CLI:
+
+```bash
+micropki demo run
+# Windows: py -m micropki demo run
+```
+
+**Важно (Windows):** скрипт создаёт временную рабочую папку в каталоге `TEMP` системы (`%TEMP%\micropki_demo_*`), а не рядом с репозиторием. Так избегаются ошибки доступа (`PermissionError`) при удалении в папках, синхронизируемых OneDrive или заблокированных антивирусом.
 
 Скрипт выполняет полный сценарий:
 
-1. **Настройка окружения** — создание временных директорий и паролей.
+1. **Настройка окружения** — временный каталог и файлы паролей (без запросов с клавиатуры).
 2. **Инициализация Root CA** — RSA-4096, самоподписанный.
 3. **Инициализация Intermediate CA** — подписан Root CA.
 4. **Выпуск сертификатов** — server, client, OCSP.
-5. **Запуск серверов** — репозиторий (порт 8080) и OCSP (порт 8081).
+5. **Запуск серверов** — репозиторий (8080) и OCSP (8081), ожидание готовности по TCP.
 6. **Валидация** — полная проверка цепочки с OCSP.
-7. **Отзыв** — серверный сертификат отзывается с причиной `keyCompromise`.
-8. **Проверка отзыва** — повторная валидация должна ПРОВАЛИТЬСЯ.
-9. **Целостность аудит-лога** — проверка хеш-цепочки.
-10. **Остановка серверов** — корректное завершение.
+7. **Политика** — выпуск клиентского сертификата с недопустимым SAN (`uri:` для шаблона `client`) **должен быть отклонён**.
+8. **Отзыв** — серверный сертификат отзывается (`keyCompromise`).
+9. **Проверка отзыва** — повторная валидация **должна провалиться** (ожидается ненулевой код выхода у `client validate`).
+10. **Целостность аудит-лога** — `audit verify`.
+11. **Остановка серверов** и удаление временного каталога.
 
-Каждый шаг выводит `[PASS]` или `[FAIL]`. Скрипт идемпотентен — при повторном запуске очищает предыдущие данные.
+На каждый шаг выводится `[PASS]` или `[FAIL]`. Повторный запуск не конфликтует со старыми данными — каждый прогон использует новый временный каталог.
 
 ---
 
@@ -238,7 +266,7 @@ python demo/demo.py
 
 ```bash
 # 1. Запустить простой HTTPS-сервер (Python)
-python -c "
+python3 -c "
 import ssl, http.server
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain('pki/certs/example.com.cert.pem', 'pki/certs/example.com.key.pem')
@@ -247,12 +275,13 @@ server.socket = ctx.wrap_socket(server.socket, server_side=True)
 print('HTTPS server running on https://127.0.0.1:8443')
 server.serve_forever()
 "
+# Windows: замените python3 на py
 
-# 2. В другом терминале — подключиться с доверием к Root CA
-curl --cacert pki/certs/ca.cert.pem https://127.0.0.1:8443 -k
+# 2. В другом терминале — подключиться, доверяя только Root CA (без -k)
+curl --cacert pki/certs/ca.cert.pem https://127.0.0.1:8443/
 
 # Или через openssl:
-openssl s_client -connect 127.0.0.1:8443 -CAfile pki/certs/ca.cert.pem -verify 2
+openssl s_client -connect 127.0.0.1:8443 -CAfile pki/certs/ca.cert.pem -verify_return_error
 ```
 
 ### Демонстрация отзыва через TLS
@@ -298,14 +327,25 @@ openssl dgst -sha256 -sign pki/certs/MicroPKI_Code_Signer.key.pem -out script.sh
 
 ### 3. Проверка подписи
 
+**Linux/macOS (bash)** — процесс-подстановка:
+
 ```bash
-# Извлечь публичный ключ из сертификата и проверить подпись
 openssl dgst -sha256 -verify <(openssl x509 -in pki/certs/MicroPKI_Code_Signer.cert.pem -pubkey -noout) -signature script.sh.sig script.sh
 # Ожидаемый результат: Verified OK
+```
 
-# Проверка после изменения файла — должна ПРОВАЛИТЬСЯ
+**Windows (PowerShell)** — сначала экспортировать публичный ключ в файл:
+
+```powershell
+openssl x509 -in pki\certs\MicroPKI_Code_Signer.cert.pem -pubkey -noout -out codesign.pub.pem
+openssl dgst -sha256 -verify codesign.pub.pem -signature script.sh.sig script.sh
+```
+
+Проверка после порчи файла — должна **провалиться**:
+
+```bash
 echo "tampered" >> script.sh
-openssl dgst -sha256 -verify <(openssl x509 -in pki/certs/MicroPKI_Code_Signer.cert.pem -pubkey -noout) -signature script.sh.sig script.sh
+openssl dgst -sha256 -verify codesign.pub.pem -signature script.sh.sig script.sh
 # Ожидаемый результат: Verification Failure
 ```
 
@@ -414,12 +454,17 @@ micropki ocsp serve --rate-limit 10 --rate-burst 20
 
 ### Запуск тестов
 
+Требуется установленный **OpenSSL** в `PATH` для части интеграционных проверок (TLS/внешние команды при необходимости).
+
 ```bash
 # Все тесты
 pytest tests/ -v
 
-# С покрытием кода
-pytest tests/ -v --cov=micropki --cov-report=term-missing
+# Windows
+py -m pytest tests/ -v
+
+# С покрытием кода (цель CI: покрытие строк ≥ 80 %)
+pytest tests/ -v --cov=micropki --cov-report=term-missing --cov-fail-under=80
 
 # Performance-тесты (1000 сертификатов)
 pytest tests/test_performance.py -v --run-perf -s

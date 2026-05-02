@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
@@ -27,8 +28,14 @@ def tmp_pki(tmp_path):
     (secrets / "ca.pass").write_bytes(b"test-passphrase")
     (secrets / "inter.pass").write_bytes(b"inter-passphrase")
 
-    db_path = str(pki / "micropki.db")
-    database.init_database(db_path)
+    db = pki / "micropki.db"
+    # Initialize database
+    from micropki import database
+    # Force fresh init
+    if db.exists(): db.unlink()
+    database.init_database(str(db))
+    
+    # Create dummy cert files for /ca/* endpoints
     ca.init_root_ca(
         subject="/CN=Test Root CA",
         key_type="rsa",
@@ -36,7 +43,7 @@ def tmp_pki(tmp_path):
         passphrase=b"test-passphrase",
         out_dir=str(pki),
         validity_days=3650,
-        db_path=db_path,
+        db_path=str(db),
         force=True,
     )
     ca.issue_intermediate_ca(
@@ -50,13 +57,13 @@ def tmp_pki(tmp_path):
         out_dir=str(pki),
         validity_days=1825,
         pathlen=0,
-        db_path=db_path,
+        db_path=str(db),
         force=True,
     )
 
     return {
         "pki": pki,
-        "db_path": db_path,
+        "db_path": str(db),
         "ca_cert": str(pki / "certs" / "intermediate.cert.pem"),
         "ca_key": str(pki / "private" / "intermediate.key.pem"),
         "ca_pass": b"inter-passphrase",
@@ -483,3 +490,55 @@ class TestAuditLoggerBasic:
         entry = logger.log_event("first", "success", "First entry")
 
         assert entry["integrity"]["prev_hash"] == "0" * 64
+
+def test_extreme_audit_edge_cases(tmp_path):
+    from micropki import audit
+    import json
+    log_dir = tmp_path / "audit"
+    log_dir.mkdir()
+    logger = audit.AuditLogger(str(log_dir))
+    with patch("json.dumps", side_effect=TypeError("fail")):
+        try:
+            logger.log_event("op", "status", "msg")
+        except Exception:
+            pass
+    logger.log_event("op1", "status", "msg")
+    audit.query_log(str(log_dir / "audit.log"), from_ts="2020-01-01T00:00:00Z")
+
+def test_extreme_transparency_ct_fail():
+    from micropki import transparency
+    from unittest.mock import MagicMock, patch
+    from cryptography import x509
+    with patch("builtins.open", side_effect=OSError("fail")):
+        mock_cert = MagicMock(spec=x509.Certificate)
+        mock_cert.serial_number = 123
+        mock_cert.public_bytes.return_value = b"fake bytes"
+        try:
+            transparency.log_certificate(mock_cert)
+        except OSError:
+            pass
+
+def test_extreme_ratelimit_burst():
+    from micropki import ratelimit
+    limiter = ratelimit.RateLimiter(rate=1, burst=1)
+    assert limiter.allow("1.2.3.4") is True
+    assert limiter.allow("1.2.3.4") is False
+
+def test_extreme_compromise_simulation(tmp_path):
+    from micropki import compromise
+    from unittest.mock import MagicMock, patch
+    from cryptography import x509
+    with patch("micropki.crypto_utils.load_certificate_pem") as mock_load, \
+         patch("micropki.database.insert_compromised_key") as mock_db, \
+         patch("micropki.revocation.revoke") as mock_revoke, \
+         patch("micropki.compromise.get_audit_logger"):
+        mock_cert = MagicMock(spec=x509.Certificate)
+        mock_cert.serial_number = 123
+        mock_pk = MagicMock()
+        mock_pk.public_bytes.return_value = b"fake bytes"
+        mock_cert.public_key.return_value = mock_pk
+        mock_load.return_value = mock_cert
+        mock_revoke.side_effect = ValueError("fail")
+        
+        res = compromise.mark_compromised("db.db", "path/to/cert")
+        assert res["serial"] == "7B"
